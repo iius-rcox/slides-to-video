@@ -562,8 +562,16 @@ def translate_pptx(pptx_path: Path, output_path: Path) -> Path:
         print(f"  Batch {i // batch_size + 1}: {len(batch)} texts")
 
         # Format for Claude to translate
+        # content_type flag controls number handling rules in the prompt:
+        # - slide_text: preserve digits exactly for layout stability
+        # - narration: allow spoken-natural number forms
         items = [
-            {"id": t["id"], "text": t["text"], "role": t.get("role", "body")}
+            {
+                "id": t["id"],
+                "text": t["text"],
+                "role": t.get("role", "body"),
+                "content_type": "narration" if t.get("type") == "notes" else "slide_text",
+            }
             for t in batch
         ]
 
@@ -651,6 +659,29 @@ The glossary is loaded via `load_glossary()` and appended to the system prompt. 
 8. **Apply translations**: `apply_translations()` splits paragraphs back to runs, restores whitespace
 9. **SmartArt validation**: Post-write re-parse verifies XML integrity
 10. **Save**: `prs.save(output_path)`
+
+## Number Handling by Content Type
+
+Use explicit mode-specific rules to avoid conflicts:
+
+### Slide Text (`content_type=slide_text`)
+- Preserve digits exactly as written for layout stability.
+- Do not rewrite digits as words.
+- Keep numbering tokens (for example `1.`, `Step 2`, `15%`, `2025`) unchanged except for surrounding translated words.
+
+Examples:
+- `3 Steps to Start` → `3 pasos para comenzar`
+- `2025 Goal: 15% Reduction` → `Meta 2025: Reducción del 15%`
+
+### Narration Text (`content_type=narration`)
+- Optimize for natural speech.
+- Spelled-out numbers are allowed when they sound better, including sentence-start numbers.
+- Keep digits when they are naturally spoken as identifiers, dates, measurements, or codes.
+
+Examples:
+- `3 steps keep your team safe.` → `Tres pasos mantienen seguro a su equipo.`
+- `Start with 2 inspections per shift.` → `Comience con 2 inspecciones por turno.`
+
 
 ## Critical Requirements
 
