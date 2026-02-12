@@ -270,7 +270,7 @@ def assemble_video(notes, slides_dir, audio_dir, output_path):
 
     for note in notes:
         sn = note["slide"]
-        audio_file = audio_dir / f"slide_{sn:02d}.mp3"
+        audio_file = audio_dir / f"slide_{sn:02d}.wav"
         padded_wav = v2_dir / f"slide_{sn:02d}_padded.wav"
 
         if audio_file.exists():
@@ -309,6 +309,17 @@ def assemble_video(notes, slides_dir, audio_dir, output_path):
     print(f"  Duration: {final_dur:.1f}s ({final_dur/60:.1f} min)")
     print(f"  Size: {size_mb:.1f} MB")
 ```
+
+
+## Legacy MP3 migration (explicit, optional)
+
+Runtime expectation is now **WAV per narrated slide** (`audio/slide_XX.wav`). If a project still has legacy `slide_XX.mp3` files, convert them before assembly:
+
+```bash
+ffmpeg -y -i audio/slide_XX.mp3 -ar 44100 -ac 2 -c:a pcm_s16le audio/slide_XX.wav
+```
+
+MP3 inputs are legacy-only and should be treated as a migration path, not the standard workflow.
 
 ## Anti-Pattern: Pairwise xfade with audio (DO NOT USE)
 

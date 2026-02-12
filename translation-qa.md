@@ -1,6 +1,15 @@
 # Translation QA Check Patterns
 
-Post-translation quality assurance checks run automatically after `apply_translations()`. Claude executes these checks in-context and auto-retranslates ERROR items (max 2 attempts). WARNING items are logged but do not block the pipeline.
+Post-translation quality assurance checks run automatically after `apply_translations()`. Claude executes these checks in-context and auto-retranslates ERROR items (max 2 attempts). WARNING items are logged and evaluated with `content_type`-specific thresholds.
+
+## Content Types
+
+Every source item should include a `content_type` so QA can apply the correct translation policy:
+
+- `slide_text` → on-slide text (titles, subtitles, body, labels)
+- `narration` → speaker notes / voiceover script
+
+If `content_type` is missing, default to `slide_text`.
 
 ## QA Checks
 
@@ -15,6 +24,7 @@ def check_never_translate(original_texts, translated_texts, never_translate_list
     for item in original_texts:
         orig = item["text"]
         trans = translated_texts.get(item["id"], "")
+        content_type = item.get("content_type", "slide_text")
         for term in never_translate_list:
             if term in orig and term not in trans:
                 errors.append({
@@ -22,41 +32,147 @@ def check_never_translate(original_texts, translated_texts, never_translate_list
                     "severity": "ERROR",
                     "id": item["id"],
                     "location": item["location"],
+                    "content_type": content_type,
                     "detail": f"Term '{term}' was altered. Original: '{orig}' → Translated: '{trans}'"
                 })
     return errors
 ```
 
-### 2. Number Preservation (WARNING)
+### 2. Slide Text Number Digit Preservation (ERROR)
 
-All numbers (integers, decimals, percentages) in the source must appear in the translation. Different formatting is acceptable (e.g., "1,000" vs "1.000").
+For `slide_text`, preserve digit-based numbers exactly as numbers (integers, decimals, percentages). Locale punctuation differences are acceptable (`1,000` vs `1.000`), but converting digits to words fails this check.
 
 ```python
 import re
 
-def check_number_preservation(original_texts, translated_texts):
-    """WARNING if numbers differ between source and translation."""
-    warnings = []
-    num_pattern = re.compile(r'\d+(?:[.,]\d+)?%?')
+DIGIT_NUM_PATTERN = re.compile(r'\d+(?:[.,]\d+)?%?')
+
+
+def normalize_digit_token(token):
+    return token.replace(",", "").replace(".", "")
+
+
+def check_slide_number_digit_preservation(original_texts, translated_texts):
+    """ERROR if slide_text numbers are not preserved as digits."""
+    errors = []
     for item in original_texts:
-        orig_nums = set(num_pattern.findall(item["text"]))
-        trans_nums = set(num_pattern.findall(translated_texts.get(item["id"], "")))
-        # Normalize: strip commas/periods for comparison
-        orig_normalized = {n.replace(",", "").replace(".", "") for n in orig_nums}
-        trans_normalized = {n.replace(",", "").replace(".", "") for n in trans_nums}
-        missing = orig_normalized - trans_normalized
+        if item.get("content_type", "slide_text") != "slide_text":
+            continue
+
+        orig_nums = {normalize_digit_token(n) for n in DIGIT_NUM_PATTERN.findall(item["text"])}
+        trans_nums = {normalize_digit_token(n) for n in DIGIT_NUM_PATTERN.findall(translated_texts.get(item["id"], ""))}
+        missing = orig_nums - trans_nums
+
         if missing:
+            errors.append({
+                "check": "slide_number_digit_preservation",
+                "severity": "ERROR",
+                "id": item["id"],
+                "location": item["location"],
+                "content_type": "slide_text",
+                "detail": f"Missing digit tokens in slide text: {sorted(missing)}"
+            })
+    return errors
+```
+
+### 3. Narration Number Safety (WARNING)
+
+For `narration`, allow number-word equivalents (e.g., `20` ↔ `veinte`) while still flagging likely numeric meaning loss.
+
+If your narration policy allows spelling out numbers, use equivalence matching. If not, skip this check and rely on strict digit preservation.
+
+```python
+import re
+
+# Minimal Spanish support for 0-100 and common ordinals used in narration.
+ES_NUMBER_EQUIVALENTS = {
+    0: {"0", "cero"},
+    1: {"1", "uno", "una", "primer", "primero", "primera"},
+    2: {"2", "dos", "segundo", "segunda"},
+    3: {"3", "tres", "tercer", "tercero", "tercera"},
+    4: {"4", "cuatro", "cuarto", "cuarta"},
+    5: {"5", "cinco", "quinto", "quinta"},
+    6: {"6", "seis", "sexto", "sexta"},
+    7: {"7", "siete", "séptimo", "séptima"},
+    8: {"8", "ocho", "octavo", "octava"},
+    9: {"9", "nueve", "noveno", "novena"},
+    10: {"10", "diez", "décimo", "décima"},
+    11: {"11", "once"},
+    12: {"12", "doce"},
+    13: {"13", "trece"},
+    14: {"14", "catorce"},
+    15: {"15", "quince"},
+    16: {"16", "dieciséis"},
+    17: {"17", "diecisiete"},
+    18: {"18", "dieciocho"},
+    19: {"19", "diecinueve"},
+    20: {"20", "veinte"},
+    21: {"21", "veintiuno", "veintiuna"},
+    22: {"22", "veintidós"},
+    23: {"23", "veintitrés"},
+    24: {"24", "veinticuatro"},
+    25: {"25", "veinticinco"},
+    26: {"26", "veintiséis"},
+    27: {"27", "veintisiete"},
+    28: {"28", "veintiocho"},
+    29: {"29", "veintinueve"},
+    30: {"30", "treinta"},
+    40: {"40", "cuarenta"},
+    50: {"50", "cincuenta"},
+    60: {"60", "sesenta"},
+    70: {"70", "setenta"},
+    80: {"80", "ochenta"},
+    90: {"90", "noventa"},
+    100: {"100", "cien", "ciento"},
+}
+
+for tens in (30, 40, 50, 60, 70, 80, 90):
+    for ones in range(1, 10):
+        value = tens + ones
+        tens_word = next(w for w in ES_NUMBER_EQUIVALENTS[tens] if w.isalpha())
+        ones_word = next(w for w in ES_NUMBER_EQUIVALENTS[ones] if w.isalpha())
+        ES_NUMBER_EQUIVALENTS[value] = {str(value), f"{tens_word} y {ones_word}"}
+
+
+def extract_numbers_and_words(text):
+    digits = {int(n) for n in re.findall(r'\b\d{1,3}\b', text)}
+    lowered = text.lower()
+    word_hits = set()
+    for value, forms in ES_NUMBER_EQUIVALENTS.items():
+        for form in forms:
+            if re.search(rf'\b{re.escape(form)}\b', lowered):
+                word_hits.add(value)
+                break
+    return digits | word_hits
+
+
+def check_narration_number_safety(original_texts, translated_texts, allow_number_words=True):
+    """WARNING if narration appears to lose number meaning."""
+    warnings = []
+    if not allow_number_words:
+        return warnings
+
+    for item in original_texts:
+        if item.get("content_type") != "narration":
+            continue
+
+        orig_number_values = extract_numbers_and_words(item["text"])
+        trans_number_values = extract_numbers_and_words(translated_texts.get(item["id"], ""))
+        missing_values = orig_number_values - trans_number_values
+
+        if missing_values:
             warnings.append({
-                "check": "number_preservation",
+                "check": "narration_number_safety",
                 "severity": "WARNING",
                 "id": item["id"],
                 "location": item["location"],
-                "detail": f"Missing numbers: {missing}"
+                "content_type": "narration",
+                "detail": f"Narration may have lost numeric meaning: {sorted(missing_values)}"
             })
     return warnings
 ```
 
-### 3. Bullet Structure Preservation (WARNING)
+### 4. Bullet Structure Preservation (WARNING)
 
 If the source text contains bullet characters or numbered list markers, the translation must contain the same count.
 
@@ -74,12 +190,13 @@ def check_bullet_structure(original_texts, translated_texts):
                 "severity": "WARNING",
                 "id": item["id"],
                 "location": item["location"],
+                "content_type": item.get("content_type", "slide_text"),
                 "detail": f"Bullet count changed: {orig_bullets} → {trans_bullets}"
             })
     return warnings
 ```
 
-### 4. Title Length Budget (ERROR)
+### 5. Title Length Budget (ERROR)
 
 Titles (role="title") must not exceed 5 words. Subtitles (role="subtitle") must not exceed 8 words. Body text must not exceed 120% of source word count.
 
@@ -99,6 +216,7 @@ def check_length_budgets(original_texts, translated_texts):
                 "severity": "ERROR",
                 "id": item["id"],
                 "location": item["location"],
+                "content_type": item.get("content_type", "slide_text"),
                 "detail": f"Title has {trans_words} words (max 5): '{trans}'"
             })
         elif role == "subtitle" and trans_words > 8:
@@ -107,6 +225,7 @@ def check_length_budgets(original_texts, translated_texts):
                 "severity": "ERROR",
                 "id": item["id"],
                 "location": item["location"],
+                "content_type": item.get("content_type", "slide_text"),
                 "detail": f"Subtitle has {trans_words} words (max 8): '{trans}'"
             })
         elif role == "body" and orig_words > 0:
@@ -117,12 +236,13 @@ def check_length_budgets(original_texts, translated_texts):
                     "severity": "ERROR",
                     "id": item["id"],
                     "location": item["location"],
+                    "content_type": item.get("content_type", "slide_text"),
                     "detail": f"Body text {ratio:.0%} of original ({trans_words} vs {orig_words} words)"
                 })
     return errors
 ```
 
-### 5. Glossary Compliance (WARNING)
+### 6. Glossary Compliance (WARNING)
 
 If a glossary term's English source appears in the original text, verify the canonical Spanish translation appears in the translated text.
 
@@ -140,12 +260,13 @@ def check_glossary_compliance(original_texts, translated_texts, glossary):
                     "severity": "WARNING",
                     "id": item["id"],
                     "location": item["location"],
+                    "content_type": item.get("content_type", "slide_text"),
                     "detail": f"Expected '{es_term}' for '{en_term}', not found in translation"
                 })
     return warnings
 ```
 
-### 6. Empty Translation Detection (ERROR)
+### 7. Empty Translation Detection (ERROR)
 
 If the source text is non-empty (after stripping whitespace), the translation must also be non-empty.
 
@@ -162,6 +283,7 @@ def check_empty_translations(original_texts, translated_texts):
                     "severity": "ERROR",
                     "id": item["id"],
                     "location": item["location"],
+                    "content_type": item.get("content_type", "slide_text"),
                     "detail": f"Non-empty source got empty translation: '{item['text'][:60]}...'"
                 })
     return errors
@@ -180,11 +302,18 @@ When ERROR items are detected:
 ## Running QA
 
 ```python
+QA_THRESHOLDS = {
+    "slide_text": {"max_errors": 0, "max_warnings": 2},
+    "narration": {"max_errors": 0, "max_warnings": 5},
+}
+
+
 def run_translation_qa(original_texts, translated_texts, glossary, never_translate):
-    """Run all QA checks and return categorized results."""
+    """Run all QA checks and return categorized + thresholded results."""
     results = []
     results.extend(check_never_translate(original_texts, translated_texts, never_translate))
-    results.extend(check_number_preservation(original_texts, translated_texts))
+    results.extend(check_slide_number_digit_preservation(original_texts, translated_texts))
+    results.extend(check_narration_number_safety(original_texts, translated_texts, allow_number_words=True))
     results.extend(check_bullet_structure(original_texts, translated_texts))
     results.extend(check_length_budgets(original_texts, translated_texts))
     results.extend(check_glossary_compliance(original_texts, translated_texts, glossary))
@@ -193,11 +322,69 @@ def run_translation_qa(original_texts, translated_texts, glossary, never_transla
     errors = [r for r in results if r["severity"] == "ERROR"]
     warnings = [r for r in results if r["severity"] == "WARNING"]
 
+    by_type = {"slide_text": {"errors": 0, "warnings": 0}, "narration": {"errors": 0, "warnings": 0}}
+    for item in results:
+        ct = item.get("content_type", "slide_text")
+        if ct not in by_type:
+            by_type[ct] = {"errors": 0, "warnings": 0}
+        key = "errors" if item["severity"] == "ERROR" else "warnings"
+        by_type[ct][key] += 1
+
+    threshold_failures = []
+    for ct, counts in by_type.items():
+        threshold = QA_THRESHOLDS.get(ct, QA_THRESHOLDS["slide_text"])
+        if counts["errors"] > threshold["max_errors"] or counts["warnings"] > threshold["max_warnings"]:
+            threshold_failures.append({
+                "content_type": ct,
+                "counts": counts,
+                "threshold": threshold,
+            })
+
     print(f"  QA: {len(errors)} errors, {len(warnings)} warnings")
     for e in errors:
-        print(f"    ERROR [{e['check']}] {e['location']}: {e['detail']}")
+        print(f"    ERROR [{e['check']}] ({e['content_type']}) {e['location']}: {e['detail']}")
     for w in warnings:
-        print(f"    WARN  [{w['check']}] {w['location']}: {w['detail']}")
+        print(f"    WARN  [{w['check']}] ({w['content_type']}) {w['location']}: {w['detail']}")
 
-    return {"errors": errors, "warnings": warnings}
+    return {
+        "errors": errors,
+        "warnings": warnings,
+        "counts_by_content_type": by_type,
+        "threshold_failures": threshold_failures,
+    }
+```
+
+## Test Fixtures / Examples
+
+Use these fixtures to validate numeric behavior for slide text vs narration.
+
+```python
+def test_narration_allows_number_words_equivalence():
+    original = [{
+        "id": "n1",
+        "location": "slide 2 notes",
+        "content_type": "narration",
+        "text": "Complete 20 tasks before launch."
+    }]
+    translated = {
+        "n1": "Completa veinte tareas antes del lanzamiento."
+    }
+
+    warnings = check_narration_number_safety(original, translated, allow_number_words=True)
+    assert warnings == []  # accepted: 20 <-> veinte
+
+
+def test_slide_text_requires_digits():
+    original = [{
+        "id": "s1",
+        "location": "slide 2 title",
+        "content_type": "slide_text",
+        "text": "20 Tasks Remaining"
+    }]
+    translated = {
+        "s1": "Veinte tareas restantes"
+    }
+
+    errors = check_slide_number_digit_preservation(original, translated)
+    assert len(errors) == 1  # strict digit preservation for slide text
 ```

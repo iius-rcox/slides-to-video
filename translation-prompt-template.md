@@ -15,6 +15,10 @@ supervisors (foremen, superintendents, general foremen) at {COMPANY_NAME},
 a company providing insulation, coatings, scaffolding, refractory, fireproofing,
 and heat tracing services.
 
+Context Flag:
+- `content_type=slide_text`
+- Apply slide-text rules whenever this flag is present.
+
 Context & Tone:
 - Use professional {TARGET_LANGUAGE} with the formal register,
 appropriate for corporate training materials.
@@ -61,7 +65,7 @@ Preservation Rules:
 - Never translate terms in the Never-Translate List above. Keep them exactly as written.
 - "{COMPANY_NAME}" is a proper name and must NEVER be translated, transliterated,
 or altered in any way — keep it exactly as written.
-- Preserve any numbers, acronyms, and proper nouns as-is.
+- Preserve acronyms and proper nouns as-is.
 - Preserve any formatting markers like bullet characters.
 - Do NOT translate placeholder text or empty strings — return them as-is.
 - Preserve line breaks (\n) exactly as they appear in the original text.
@@ -69,6 +73,15 @@ or altered in any way — keep it exactly as written.
 where text runs split and must be in the same positions in the translation.
 - If a text string is ONLY whitespace, numbers, or punctuation, return it unchanged.
 - Return valid JSON matching the schema exactly.
+
+Number Handling — Slide Text (layout-stability mode):
+- Preserve digits exactly as written (including year, percentages, step labels, and units), unless the source itself spells the number out.
+- Do not rewrite digits into words.
+- Keep punctuation around digits consistent with target-language norms only when it does not change the digits.
+
+Examples (`content_type=slide_text`):
+- Source: `3 Steps to Start` → Target: `3 pasos para comenzar`
+- Source: `2025 Goal: 15% Reduction` → Target: `Meta 2025: Reducción del 15%`
 ```
 
 ## Narration Translation Prompt
@@ -79,6 +92,10 @@ Used for text items with `type: "notes"`. These are spoken aloud by TTS and must
 You are a professional translator specializing in {SOURCE_LANGUAGE}-to-{TARGET_LANGUAGE} translation
 for narrated training video voiceovers. The audience is field supervisors at {COMPANY_NAME}.
 This text will be read aloud by a text-to-speech engine.
+
+Context Flag:
+- `content_type=narration`
+- Apply narration rules whenever this flag is present.
 
 Terminology:
 {GLOSSARY_ENTRIES}
@@ -104,11 +121,19 @@ Translation Quality:
 - Preserve full meaning. Do not add, remove, or reorder information.
 - Use the canonical glossary translations above when the English term appears.
 - Replace idioms with natural {TARGET_LANGUAGE} equivalents.
-- Numbers should be written as words if they start a sentence, digits otherwise.
+
+Number Handling — Narration Text (spoken-natural mode):
+- Prioritize natural spoken delivery.
+- You may spell out numbers when this sounds more natural in speech, especially at sentence starts.
+- Digits are still acceptable where spoken naturally (dates, measurements, model names, safety codes).
+
+Examples (`content_type=narration`):
+- Source: `3 steps keep your team safe.` → Target: `Tres pasos mantienen seguro a su equipo.`
+- Source: `Start with 2 inspections per shift.` → Target: `Comience con 2 inspecciones por turno.`
 
 Preservation Rules:
 - Never translate terms in the Never-Translate List.
-- Preserve any numbers and proper nouns as-is.
+- Preserve proper nouns and required identifiers (e.g., model names, codes) exactly.
 - Preserve line breaks (\n) exactly as they appear.
 - Preserve run boundary markers (||N||) in the same positions.
 - Return valid JSON matching the schema exactly.
@@ -152,7 +177,18 @@ def format_glossary_for_prompt(glossary_path: Path) -> tuple[str, str]:
 ### Choosing the Right Prompt
 
 When preparing text items for Claude to translate:
-- Items with `type: "notes"` → use the **Narration Translation Prompt**
-- Items with `type: "slide"`, `"table"`, or `"smartart"` → use the **Slide Text Translation Prompt**
+- Items with `type: "notes"` → use the **Narration Translation Prompt** and set `content_type: "narration"`
+- Items with `type: "slide"`, `"table"`, or `"smartart"` → use the **Slide Text Translation Prompt** and set `content_type: "slide_text"`
+
+Example payload item:
+
+```json
+{
+  "id": 12,
+  "text": "3 Steps to Start",
+  "role": "title",
+  "content_type": "slide_text"
+}
+```
 
 Claude translates all items in-context, applying the appropriate prompt based on type. No external API calls needed.

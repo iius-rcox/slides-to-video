@@ -1,7 +1,7 @@
 {
   "_meta": {
     "description": "EN->ES terminology glossary for construction industry supervisor training translations",
-    "usage": "Loaded by Claude during translation. Terms in 'glossary' are canonical translations. Terms in 'never_translate' must remain unchanged in the target text.",
+    "usage": "Loaded by Claude during translation. Terms in 'glossary' are canonical translations. Acronym policy: always translate English acronyms that have approved Spanish equivalents (e.g., PPE→EPP, JHA→ART); therefore PPE and JHA must not appear in 'never_translate'. Terms in 'never_translate' must remain unchanged in the target text.",
     "source_language": "en",
     "target_language": "es",
     "how_to_extend": "Add new key-value pairs to 'glossary' or new strings to 'never_translate'. Keep alphabetical order."
@@ -83,8 +83,6 @@
     "ElevenLabs",
     "OSHA",
     "LOTO",
-    "PPE",
-    "EPP",
-    "JHA"
+    "EPP"
   ]
 }

@@ -12,7 +12,7 @@ Generates a narrated video from a PowerPoint file by:
 4. Applying language-specific text normalization and TTS pronunciation fixes
 5. Exporting slides as 1920x1080 PNG images
 6. Synthesizing voiceover audio via ElevenLabs TTS (per-language voice config from `lang_config.json`)
-7. Assembling a video: slide images + audio + crossfade transitions + broadcast-quality audio processing
+7. Assembling a video: slide images + audio + crossfade transitions + configurable broadcast-quality audio processing (language and voice aware)
 
 Each slide's duration is driven by its audio length, producing natural pacing. Quality gates at each pipeline stage catch errors early.
 
@@ -29,7 +29,7 @@ Each slide's duration is driven by its audio length, producing natural pacing. Q
 Translation (if needed) also uses Claude in-context — no external LLM API required.
 
 **Configuration files (in the skill directory):**
-- `lang_config.json` — Per-language voice IDs, VoiceSettings, TTS replacements, text normalization rules
+- `lang_config.json` — Per-language voice IDs, VoiceSettings, TTS replacements, text normalization rules, and audio post-processing presets (plus optional per-voice overrides)
 - `glossary_en_es.json` — EN→ES terminology glossary + never-translate list (used during translation)
 
 **Verify with:**
@@ -88,6 +88,27 @@ PPTX ──> [Optional: Translate text + notes + SmartArt]
      ──> {stem}_{lang}.mp4
 ```
 
+
+## Canonical Expected Directory Structure
+
+Use this as the canonical layout for one run:
+
+```text
+<work_dir>/
+├── notes.json
+├── notes_refined.json
+├── slides/
+│   ├── slide_01.png
+│   ├── slide_02.png
+│   └── ...
+└── audio/
+    ├── slide_01.wav
+    ├── slide_02.wav
+    └── ...
+```
+
+`assemble_video.py` expects narrated slides to have matching `audio/slide_XX.wav` files. Empty-note slides are the only ones that should omit narration audio.
+
 # Step 1 (Optional): Translate the PPTX
 
 **Skip this step if** the PPTX is already in the target language.
@@ -101,6 +122,7 @@ PPTX ──> [Optional: Translate text + notes + SmartArt]
 
 1. Open the PPTX with `python-pptx`
 2. **Load glossary** from `glossary_en_es.json` — provides canonical term translations and never-translate list
+2. **Run glossary lint gate**: `python validate_glossary.py glossary_en_es.json` (blocks conflicting entries before translation starts)
 3. Walk all slides -> shapes -> text frames -> **paragraphs** (not individual runs)
 4. For each shape, detect its **role** (`title`, `subtitle`, `body`) using `PP_PLACEHOLDER` types
 5. **Collect text at paragraph level** using `||N||` run boundary markers to preserve run structure. This ensures Claude translates complete sentences, not run fragments.
@@ -149,7 +171,22 @@ If translating, extract from the **translated** PPTX (not the original).
 **Performed by Claude Code (Opus) directly in-context. No external API needed.**
 **Validation rules:** See `./narration-refinement.md`
 
-**Trigger:** The `extract_notes.py` script reports whether robotic style was detected (60%+ of non-empty notes start with "Click on", "Navigate to", "Select the", etc.). If detected, Claude reads `notes.json` and rewrites each note as natural conversational narration.
+**Trigger (per-slide scoring, not all-or-nothing):** The `extract_notes.py` script reports candidate robotic style signals, then Claude scores each non-empty slide individually and only rewrites slides above threshold.
+
+Use weighted cues that favor true UI-instruction language:
+- **Strong cues (+3 each):** imperative UI verbs at clause start (`click`, `select`, `open`, `go to`, `navigate`, `choose`, `enter`, `type`) and direct UI-target phrases (`button`, `menu`, `dropdown`, `tab`, `panel`, `field`).
+- **Medium cues (+2 each):** explicit step sequencing (`Step 1`, `1.`, `2)`, `Next,`, `Then,`, `After that`) and short command chains.
+- **Light cues (+1 each):** repetitive command framing across consecutive sentences.
+- **Negative cues (-2 each):** explanatory narration patterns (`we'll cover`, `this slide shows`, `let's look at`, `in summary`) and conceptual/strategy language.
+
+Avoid broad lexical triggers (for example, generic prepositional phrases like **"in the"**) because they overfire on normal narration.
+
+**Default calibration:** refine only when a slide's score is **≥4**.
+
+**Calibration examples (should NOT trigger refinement):**
+- "In the next section, we'll review how the onboarding flow reduces setup time and where teams usually get blocked."
+- "This slide explains why we chose quarterly checkpoints and how we measure adoption after launch."
+- "As you can see in the chart, response time improved after the caching update."
 
 **What Claude fixes:**
 - Repetitive "Click on the X button" → varied phrasing ("Select X", "Go ahead and open X", "You'll want to click X")
@@ -176,10 +213,11 @@ Any validation failure falls back to the original note for that slide (non-block
 
 **Process:**
 1. Read `notes.json` from Step 2
-2. If robotic style detected (or user forces it), rewrite notes directly
-3. Run validation checklist on each refined note
-4. Write refined notes as `notes_refined.json` in work directory
-5. All subsequent steps (TTS, assembly) use `notes_refined.json` if it exists, else `notes.json`
+2. Score each non-empty slide for robotic UI-instruction style using the weighted cues above
+3. Rewrite only slides that cross the refinement threshold (or user-forced slides)
+4. Run validation checklist on each rewritten slide
+5. Merge rewritten slides with untouched originals and write `notes_refined.json` in work directory
+6. All subsequent steps (TTS, assembly) use `notes_refined.json` if it exists, else `notes.json`
 
 **Checkpoint:** If `notes_refined.json` exists, use it instead of re-running refinement. The original `notes.json` is always preserved for reference.
 
@@ -259,7 +297,36 @@ Add entries to `lang_config.json` when TTS mispronounces a word or brand name.
 
 **Output:** `audio/slide_01.wav`, `audio/slide_02.wav`, ... (WAV files, not MP3)
 
+## Audio Post-Processing Presets (assemble_video.py)
+
+`assemble_video.py` now reads `audio_postprocessing` from `lang_config.json` (selected by `--lang`, with optional `--voice-id` override lookup).
+
+Supported controls:
+- `presence_eq.enabled` / `presence_eq.gain_db` — tune or disable the ~3kHz presence lift
+- `highpass.enabled` / `highpass.frequency` — tune or disable low-end rumble filtering
+- `limiter.intensity` — scale limiter aggressiveness (0.0 = mild, 1.0 = strongest)
+- `deesser.enabled` / `deesser.intensity` — optional de-esser for sibilant voices
+- `loudnorm.two_pass` — optional first-pass measurement mode for long-form stability
+
+Override precedence:
+1. Built-in defaults in `assemble_video.py`
+2. `lang_config.json` -> `<lang>.audio_postprocessing`
+3. `lang_config.json` -> `<lang>.voice_overrides.<voice_id>.audio_postprocessing`
+
+Example:
+```bash
+python assemble_video.py notes_refined.json slides audio output.mp4 --lang en --voice-id NHjG3gYsiwhncLX4Nfhc
+```
+
 **Checkpoint:** Per-slide — if `audio/slide_NN.wav` exists, skip that slide.
+
+
+**Legacy MP3 migration (explicit):** If older runs produced `audio/slide_XX.mp3`, treat them as legacy inputs and convert before assembly:
+
+```bash
+ffmpeg -y -i audio/slide_XX.mp3 -ar 44100 -ac 2 -c:a pcm_s16le audio/slide_XX.wav
+```
+
 
 # Step 5: Assemble Final Video
 
@@ -276,9 +343,14 @@ Audio and video MUST be built as separate tracks and muxed at the end. The audio
 1. **Pad per-slide audio as lossless WAV** — use `pcm_s16le` intermediates, NOT AAC, to avoid lossy compression at this stage. For silent slides, create a WAV of silence.
 2. **Concatenate all WAVs** into one continuous lossless audio track using ffmpeg concat demuxer (no re-encode: `-c:a pcm_s16le`).
 3. **Build video-only slideshow** from slide PNGs with xfade crossfade transitions (`-an` flag, no audio in the filter graph). Use per-slide durations matching their padded audio. Falls back to concat demuxer if xfade fails.
-4. **Mux video + audio** with broadcast-quality audio processing in a single final step:
+4. **Mux video + audio** with configurable broadcast-quality audio processing in a single final step:
    - `-c:v copy` (no video re-encode)
-   - Audio filter chain: `loudnorm=I=-16:LRA=11:TP=-1.5` (EBU R128 broadcast loudness) → `highpass=f=80` (remove low-frequency rumble) → `equalizer=f=3000:width_type=o:width=1.5:g=1.5` (speech presence boost) → `alimiter=limit=0.891:attack=5:release=50` (peak limiter at -1dB)
+   - Audio filter chain is built from `lang_config.json` presets:
+     - optional `deesser` for sibilant voices
+     - `highpass` (rumble control)
+     - `equalizer` presence boost near 3kHz (`presence_eq`)
+     - `loudnorm` (single-pass or optional two-pass mode)
+     - `alimiter` with tunable `limiter.intensity`
    - `-c:a aac -b:a 256k` (single high-quality AAC encode)
    - `-ar 44100` (consistent sample rate)
    - `-movflags +faststart` (web streaming optimization)

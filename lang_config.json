@@ -1,8 +1,9 @@
 {
   "_meta": {
-    "description": "Per-language TTS configuration: voice IDs, voice settings, pronunciation replacements, and text normalization rules",
+    "description": "Per-language TTS + assembly configuration: voice IDs, voice settings, pronunciation replacements, text normalization rules, and audio post-processing presets",
     "usage": "Loaded by synthesize_tts.py via load_lang_config(lang). Falls back to hardcoded defaults if file is missing or lang key absent.",
-    "how_to_extend": "Add a new top-level key for each language code. Copy the 'en' block as a template."
+    "how_to_extend": "Add a new top-level key for each language code. Copy the 'en' block as a template. Use audio_postprocessing for language-level defaults and voice_overrides.<voice_id>.audio_postprocessing for voice-specific tuning.",
+    "audio_postprocessing_notes": "presence_eq.gain_db controls 3kHz intelligibility boost, highpass.frequency removes low-end rumble, limiter.intensity sets final peak control (0.0 mild -> 1.0 strongest), and loudnorm.two_pass enables first-pass analysis for long-form consistency."
   },
   "en": {
     "voice_id": "NHjG3gYsiwhncLX4Nfhc",
@@ -38,6 +39,65 @@
       "\\bw/\\b": "with",
       "\\bw/o\\b": "without",
       "\\b24/7\\b": "twenty four seven"
+    },
+    "audio_postprocessing": {
+      "deesser": {
+        "enabled": false,
+        "intensity": 0.0,
+        "mode": "wide",
+        "frequency": 6000
+      },
+      "highpass": {
+        "enabled": true,
+        "frequency": 80
+      },
+      "presence_eq": {
+        "enabled": true,
+        "frequency": 3000,
+        "width_octave": 1.5,
+        "gain_db": 1.5
+      },
+      "loudnorm": {
+        "enabled": true,
+        "two_pass": false,
+        "I": -16,
+        "LRA": 11,
+        "TP": -1.5
+      },
+      "limiter": {
+        "enabled": true,
+        "intensity": 1.0,
+        "base_limit": 0.891,
+        "attack": 5,
+        "release": 50
+      }
+    },
+    "voice_overrides": {
+      "NHjG3gYsiwhncLX4Nfhc": {
+        "audio_postprocessing": {
+          "presence_eq": {
+            "gain_db": 1.3
+          }
+        }
+      },
+      "SIBILANT_EN_SAMPLE": {
+        "audio_postprocessing": {
+          "deesser": {
+            "enabled": true,
+            "intensity": 0.35,
+            "frequency": 6200
+          },
+          "presence_eq": {
+            "gain_db": 0.8
+          },
+          "loudnorm": {
+            "two_pass": true
+          },
+          "limiter": {
+            "intensity": 0.85
+          }
+        }
+      }
     }
   },
   "es": {
@@ -69,6 +129,47 @@
       "\\betc\\.": "etcétera",
       "\\bNº\\s?(\\d+)": "número \\1",
       "\\b24/7\\b": "veinticuatro siete"
+    },
+    "audio_postprocessing": {
+      "deesser": {
+        "enabled": false,
+        "intensity": 0.0,
+        "mode": "wide",
+        "frequency": 6000
+      },
+      "highpass": {
+        "enabled": true,
+        "frequency": 85
+      },
+      "presence_eq": {
+        "enabled": true,
+        "frequency": 3000,
+        "width_octave": 1.5,
+        "gain_db": 1.1
+      },
+      "loudnorm": {
+        "enabled": true,
+        "two_pass": false,
+        "I": -16,
+        "LRA": 11,
+        "TP": -1.5
+      },
+      "limiter": {
+        "enabled": true,
+        "intensity": 0.95,
+        "base_limit": 0.891,
+        "attack": 5,
+        "release": 50
+      }
+    },
+    "voice_overrides": {
+      "sDh3eviBhiuHKi0MjTNq": {
+        "audio_postprocessing": {
+          "presence_eq": {
+            "gain_db": 1.0
+          }
+        }
+      }
     }
   }
 }
