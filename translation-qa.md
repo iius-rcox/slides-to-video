@@ -2,6 +2,10 @@
 
 Post-translation quality assurance checks run automatically after `apply_translations()`. Claude executes these checks in-context and auto-retranslates ERROR items (max 2 attempts). WARNING items are logged but do not block the pipeline.
 
+> **Authority split:**
+> - **LLM QA in this file is advisory** and improves translation quality during generation.
+> - **`run_gates.py` checks are authoritative** for CRITICAL pass/fail enforcement on artifacts.
+
 ## QA Checks
 
 ### 1. Never-Translate Preservation (ERROR)

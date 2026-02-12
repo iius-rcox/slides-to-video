@@ -2,6 +2,9 @@
 
 Default system prompts for PPTX text translation. Claude Code (Opus) uses these prompts when translating text in-context. Users can customize for their specific industry, tone, and terminology.
 
+> **Important:** These prompts drive LLM translation behavior and self-check quality only.
+> The authoritative pass/fail decision comes from `run_gates.py` artifact checks (CRITICAL gates).
+
 **To customize:** Copy and modify the relevant prompt for your target audience.
 
 ## Slide Text Translation Prompt

@@ -217,6 +217,7 @@ def main():
     parser.add_argument("slides_dir", help="Directory with slide PNGs")
     parser.add_argument("audio_dir", help="Directory with TTS WAV files")
     parser.add_argument("output_mp4", help="Output video path")
+    parser.add_argument("--translated-payload", default=None, help="Optional translation payload JSON for post-translation checks")
     args = parser.parse_args()
 
     notes_path = Path(args.notes_json)
@@ -274,6 +275,26 @@ def main():
     # Step 4: Mux
     print("\nStep 4: Muxing video + audio (single AAC encode)...")
     mux_video_audio(video_only, full_audio, output_path)
+
+    gate_report = output_path.parent / f"{output_path.stem}_gate_report.json"
+    gate_cmd = [
+        sys.executable,
+        str(Path(__file__).parent / "run_gates.py"),
+        "--notes", str(notes_path),
+        "--slides-dir", str(slides_dir),
+        "--audio-dir", str(audio_dir),
+        "--video", str(output_path),
+        "--report-json", str(gate_report),
+    ]
+    if args.translated_payload:
+        gate_cmd.extend(["--translated-payload", str(args.translated_payload)])
+
+    print("\nStep 5: Running authoritative gate validation...")
+    gate_result = subprocess.run(gate_cmd, timeout=FFMPEG_TIMEOUT)
+    if gate_result.returncode != 0:
+        print("\nGate validation failed. See JSON report for details:")
+        print(f"  {gate_report}")
+        sys.exit(gate_result.returncode)
 
     final_dur = get_duration(output_path)
     size_mb = output_path.stat().st_size / (1024 * 1024)

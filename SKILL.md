@@ -14,7 +14,11 @@ Generates a narrated video from a PowerPoint file by:
 6. Synthesizing voiceover audio via ElevenLabs TTS (per-language voice config from `lang_config.json`)
 7. Assembling a video: slide images + audio + crossfade transitions + broadcast-quality audio processing
 
-Each slide's duration is driven by its audio length, producing natural pacing. Quality gates at each pipeline stage catch errors early.
+Each slide's duration is driven by its audio length, producing natural pacing.
+
+**Gate enforcement model:**
+- **Authoritative:** `run_gates.py` enforces CRITICAL checks against generated artifacts and exits non-zero on failure.
+- **Advisory:** LLM/Claude self-checks help during generation but do not replace script enforcement.
 
 # Prerequisites
 
@@ -47,7 +51,8 @@ Reusable scripts live in the skill directory. Invoke them with CLI arguments —
 | `./extract_notes.py` | Extract speaker notes from PPTX | `python extract_notes.py <pptx> <output.json>` |
 | `./export_slides.ps1` | Export slides as PNGs via PowerPoint COM | `powershell -File export_slides.ps1 -PptxPath <pptx> -OutputDir <dir>` |
 | `./synthesize_tts.py` | Synthesize TTS audio per slide | `python synthesize_tts.py <notes.json> <audio_dir> [--voice-id ID] [--lang en]` |
-| `./assemble_video.py` | Split-track video assembly | `python assemble_video.py <notes.json> <slides_dir> <audio_dir> <output.mp4>` |
+| `./assemble_video.py` | Split-track video assembly + mandatory gate enforcement | `python assemble_video.py <notes.json> <slides_dir> <audio_dir> <output.mp4> [--translated-payload payload.json]` |
+| `./run_gates.py` | Authoritative artifact gate runner (JSON report + nonzero on CRITICAL failures) | `python run_gates.py --notes <notes.json> --slides-dir <dir> --audio-dir <dir> --video <output.mp4> [--translated-payload payload.json]` |
 
 The skill directory path is available as a variable during execution. Always use absolute paths when invoking these scripts.
 
@@ -85,6 +90,7 @@ PPTX ──> [Optional: Translate text + notes + SmartArt]
      ──> Export Slide PNGs         (export_slides.ps1)
      ──> Synthesize TTS Audio      (synthesize_tts.py)
      ──> Assemble Video            (assemble_video.py)
+     ──> Enforced Gate Validation   (run_gates.py, invoked by assemble_video.py)
      ──> {stem}_{lang}.mp4
 ```
 
@@ -385,3 +391,15 @@ Given input `Presentation.pptx` and language `es`:
 - `./narration-refinement.md` — Refinement validation rules (word caps, divergence fallback)
 - `./tts-normalization.md` — Language-specific TTS text normalization patterns and rules
 - `./quality-gates.md` — Pipeline-wide quality gate definitions (6 gates, per-stage checks)
+
+
+## CI Enforcement Hook
+
+CI must assert that assembly always invokes `run_gates.py` so direct script use cannot bypass enforcement.
+Use:
+
+```bash
+rg -n "run_gates.py" assemble_video.py
+```
+
+Treat removal of this invocation as a CI failure.
