@@ -1,0 +1,74 @@
+{
+  "_meta": {
+    "description": "Per-language TTS configuration: voice IDs, voice settings, pronunciation replacements, and text normalization rules",
+    "usage": "Loaded by synthesize_tts.py via load_lang_config(lang). Falls back to hardcoded defaults if file is missing or lang key absent.",
+    "how_to_extend": "Add a new top-level key for each language code. Copy the 'en' block as a template."
+  },
+  "en": {
+    "voice_id": "NHjG3gYsiwhncLX4Nfhc",
+    "voice_settings": {
+      "stability": 0.50,
+      "similarity_boost": 0.80,
+      "style": 0.0,
+      "use_speaker_boost": true,
+      "speed": 1.0
+    },
+    "tts_replacements": {
+      "\\bI&I Soft Craft Solutions\\b": "Eye and Eye Soft Craft Solutions",
+      "\\bI&I\\b": "Eye and Eye",
+      "\\bI & I\\b": "Eye and Eye",
+      "\\bSmartBarrel\\b": "Smart Barrel",
+      "\\bSmartbarrel\\b": "Smart Barrel",
+      "\\bSafetyAmp\\b": "Safety Amp",
+      "\\bLOTO\\b": "Lock out Tag out",
+      "\\bJHA\\b": "J H A",
+      "\\bPPE\\b": "P P E"
+    },
+    "normalization": {
+      "\\b(\\d+)ft\\b": "\\1 feet",
+      "\\b(\\d+)in\\b": "\\1 inches",
+      "\\b(\\d+)lb\\b": "\\1 pounds",
+      "\\b(\\d+)°F\\b": "\\1 degrees Fahrenheit",
+      "\\b(\\d+)°C\\b": "\\1 degrees Celsius",
+      "\\b(\\d+)psi\\b": "\\1 P S I",
+      "\\be\\.g\\.": "for example",
+      "\\bi\\.e\\.": "that is",
+      "\\betc\\.": "etcetera",
+      "\\bvs\\.?\\b": "versus",
+      "\\bw/\\b": "with",
+      "\\bw/o\\b": "without",
+      "\\b24/7\\b": "twenty four seven"
+    }
+  },
+  "es": {
+    "voice_id": "sDh3eviBhiuHKi0MjTNq",
+    "voice_settings": {
+      "stability": 0.55,
+      "similarity_boost": 0.75,
+      "style": 0.0,
+      "use_speaker_boost": true,
+      "speed": 0.95
+    },
+    "tts_replacements": {
+      "\\bI&I Soft Craft Solutions\\b": "Eye and Eye Soft Craft Solutions",
+      "\\bI&I\\b": "Eye and Eye",
+      "\\bI & I\\b": "Eye and Eye",
+      "\\bSmartBarrel\\b": "Smart Barrel",
+      "\\bSmartbarrel\\b": "Smart Barrel",
+      "\\bSafetyAmp\\b": "Safety Amp",
+      "\\bLOTO\\b": "bloqueo etiquetado",
+      "\\bEPP\\b": "E P P"
+    },
+    "normalization": {
+      "\\b(\\d+)\\s?m\\b": "\\1 metros",
+      "\\b(\\d+)\\s?cm\\b": "\\1 centímetros",
+      "\\b(\\d+)\\s?kg\\b": "\\1 kilogramos",
+      "\\b(\\d+)°C\\b": "\\1 grados centígrados",
+      "\\b(\\d+)°F\\b": "\\1 grados Fahrenheit",
+      "\\bp\\.\\s?ej\\.": "por ejemplo",
+      "\\betc\\.": "etcétera",
+      "\\bNº\\s?(\\d+)": "número \\1",
+      "\\b24/7\\b": "veinticuatro siete"
+    }
+  }
+}
