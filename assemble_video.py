@@ -17,6 +17,7 @@ Steps:
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -32,6 +33,39 @@ PRE_PAD = 1.0
 POST_PAD = 1.0
 SILENT_SLIDE_DUR = 2.0
 TRANSITION_DURATION = 0.5
+
+DEFAULT_AUDIO_POSTPROCESSING = {
+    "deesser": {
+        "enabled": False,
+        "intensity": 0.0,
+        "mode": "wide",
+        "frequency": 6000,
+    },
+    "highpass": {
+        "enabled": True,
+        "frequency": 80,
+    },
+    "presence_eq": {
+        "enabled": True,
+        "frequency": 3000,
+        "width_octave": 1.5,
+        "gain_db": 1.5,
+    },
+    "loudnorm": {
+        "enabled": True,
+        "two_pass": False,
+        "I": -16,
+        "LRA": 11,
+        "TP": -1.5,
+    },
+    "limiter": {
+        "enabled": True,
+        "intensity": 1.0,
+        "base_limit": 0.891,
+        "attack": 5,
+        "release": 50,
+    },
+}
 
 
 def _is_narrated_slide(note: dict) -> bool:
@@ -89,6 +123,143 @@ def get_duration(path: Path) -> float:
         capture_output=True, text=True, timeout=30,
     )
     return float(json.loads(r.stdout)["format"]["duration"])
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def load_audio_postprocess_config(lang: str, voice_id: str | None) -> dict:
+    """Load per-language/per-voice audio post-processing from lang_config.json."""
+    config_path = Path(__file__).parent / "lang_config.json"
+    config = DEFAULT_AUDIO_POSTPROCESSING
+
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            all_config = json.load(f)
+    except FileNotFoundError:
+        print("  Warning: lang_config.json not found, using default audio post-processing")
+        return config
+    except json.JSONDecodeError as e:
+        print(f"  Warning: Error reading lang_config.json ({e}), using default audio post-processing")
+        return config
+
+    lang_cfg = all_config.get(lang)
+    if not lang_cfg:
+        print(f"  Warning: Language '{lang}' not found in lang_config.json, using default audio post-processing")
+        return config
+
+    config = _deep_merge(config, lang_cfg.get("audio_postprocessing", {}))
+
+    if voice_id:
+        voice_cfg = lang_cfg.get("voice_overrides", {}).get(voice_id, {})
+        config = _deep_merge(config, voice_cfg.get("audio_postprocessing", {}))
+
+    return config
+
+
+def build_audio_filter_chain(config: dict, include_limiter: bool = True, loudnorm_override: str | None = None) -> str:
+    filters: list[str] = []
+
+    deesser = config.get("deesser", {})
+    if deesser.get("enabled"):
+        intensity = max(0.0, float(deesser.get("intensity", 0.0)))
+        if intensity > 0:
+            mode = deesser.get("mode", "wide")
+            freq = int(deesser.get("frequency", 6000))
+            filters.append(f"deesser=i={intensity:.3f}:m={mode}:f={freq}")
+
+    highpass = config.get("highpass", {})
+    if highpass.get("enabled"):
+        freq = float(highpass.get("frequency", 80))
+        if freq > 0:
+            filters.append(f"highpass=f={freq:g}")
+
+    presence = config.get("presence_eq", {})
+    if presence.get("enabled"):
+        gain = float(presence.get("gain_db", 0.0))
+        if abs(gain) > 1e-3:
+            freq = float(presence.get("frequency", 3000))
+            width = float(presence.get("width_octave", 1.5))
+            filters.append(
+                f"equalizer=f={freq:g}:width_type=o:width={width:g}:g={gain:g}"
+            )
+
+    if loudnorm_override:
+        filters.append(loudnorm_override)
+    else:
+        loudnorm_cfg = config.get("loudnorm", {})
+        if loudnorm_cfg.get("enabled"):
+            filters.append(
+                "loudnorm="
+                f"I={float(loudnorm_cfg.get('I', -16)):g}:"
+                f"LRA={float(loudnorm_cfg.get('LRA', 11)):g}:"
+                f"TP={float(loudnorm_cfg.get('TP', -1.5)):g}"
+            )
+
+    limiter_cfg = config.get("limiter", {})
+    if include_limiter and limiter_cfg.get("enabled"):
+        base_limit = float(limiter_cfg.get("base_limit", 0.891))
+        intensity = max(0.0, float(limiter_cfg.get("intensity", 1.0)))
+        attack = float(limiter_cfg.get("attack", 5))
+        release = float(limiter_cfg.get("release", 50))
+        limit = min(1.0, base_limit + (1.0 - base_limit) * (1.0 - intensity))
+        filters.append(f"alimiter=limit={limit:.3f}:attack={attack:g}:release={release:g}")
+
+    return ",".join(filters) if filters else "anull"
+
+
+def _parse_loudnorm_stats(stderr: str) -> dict | None:
+    matches = re.findall(r"\{\s*\"input_i\".*?\}", stderr, flags=re.DOTALL)
+    if not matches:
+        return None
+    try:
+        return json.loads(matches[-1])
+    except json.JSONDecodeError:
+        return None
+
+
+def run_loudnorm_analysis(audio_path: Path, config: dict) -> dict | None:
+    loudnorm_cfg = config.get("loudnorm", {})
+    analysis_filter = (
+        "loudnorm="
+        f"I={float(loudnorm_cfg.get('I', -16)):g}:"
+        f"LRA={float(loudnorm_cfg.get('LRA', 11)):g}:"
+        f"TP={float(loudnorm_cfg.get('TP', -1.5)):g}:"
+        "print_format=json"
+    )
+    chain = build_audio_filter_chain(config, include_limiter=False, loudnorm_override=analysis_filter)
+
+    result = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-i", str(audio_path), "-af", chain, "-f", "null", "-"],
+        capture_output=True, text=True, timeout=FFMPEG_TIMEOUT,
+    )
+    if result.returncode != 0:
+        return None
+    return _parse_loudnorm_stats(result.stderr)
+
+
+def build_two_pass_loudnorm_filter(config: dict, stats: dict) -> str:
+    loudnorm_cfg = config.get("loudnorm", {})
+    loudnorm = (
+        "loudnorm="
+        f"I={float(loudnorm_cfg.get('I', -16)):g}:"
+        f"LRA={float(loudnorm_cfg.get('LRA', 11)):g}:"
+        f"TP={float(loudnorm_cfg.get('TP', -1.5)):g}:"
+        f"measured_I={float(stats['input_i']):g}:"
+        f"measured_LRA={float(stats['input_lra']):g}:"
+        f"measured_TP={float(stats['input_tp']):g}:"
+        f"measured_thresh={float(stats['input_thresh']):g}:"
+        f"offset={float(stats['target_offset']):g}:"
+        "linear=true:print_format=summary"
+    )
+    return build_audio_filter_chain(config, include_limiter=True, loudnorm_override=loudnorm)
 
 
 # ── Step 1: Lossless WAV intermediates ──
@@ -224,7 +395,7 @@ def _fallback_concat_video(notes, slides_dir, slide_durations, output_path):
 
 # ── Step 4: Final mux ──
 
-def mux_video_audio(video_path: Path, audio_path: Path, output_path: Path) -> None:
+def mux_video_audio(video_path: Path, audio_path: Path, output_path: Path, config: dict) -> None:
     """Mux video + audio with broadcast-quality audio processing.
 
     Audio filter chain (applied during the single AAC encode):
@@ -236,12 +407,19 @@ def mux_video_audio(video_path: Path, audio_path: Path, output_path: Path) -> No
     Video is copied (no re-encode). Audio encoded to 256k AAC.
     -movflags +faststart moves the moov atom for web streaming.
     """
-    audio_filters = (
-        "loudnorm=I=-16:LRA=11:TP=-1.5,"
-        "highpass=f=80,"
-        "equalizer=f=3000:width_type=o:width=1.5:g=1.5,"
-        "alimiter=limit=0.891:attack=5:release=50"
-    )
+    loudnorm_cfg = config.get("loudnorm", {})
+    two_pass = loudnorm_cfg.get("enabled") and loudnorm_cfg.get("two_pass")
+    if two_pass:
+        stats = run_loudnorm_analysis(audio_path, config)
+        if stats:
+            print("  Audio post-processing: two-pass loudnorm enabled")
+            audio_filters = build_two_pass_loudnorm_filter(config, stats)
+        else:
+            print("  Warning: loudnorm analysis failed, falling back to single-pass")
+            audio_filters = build_audio_filter_chain(config)
+    else:
+        audio_filters = build_audio_filter_chain(config)
+
     subprocess.run(
         ["ffmpeg", "-y",
          "-i", str(video_path),
@@ -266,6 +444,8 @@ def main():
     parser.add_argument("slides_dir", help="Directory with slide PNGs")
     parser.add_argument("audio_dir", help="Directory with TTS WAV files")
     parser.add_argument("output_mp4", help="Output video path")
+    parser.add_argument("--lang", default="en", help="Language code for post-processing config")
+    parser.add_argument("--voice-id", default=None, help="Voice ID for per-voice post-processing overrides")
     args = parser.parse_args()
 
     notes_path = Path(args.notes_json)
@@ -324,7 +504,8 @@ def main():
 
     # Step 4: Mux
     print("\nStep 4: Muxing video + audio (single AAC encode)...")
-    mux_video_audio(video_only, full_audio, output_path)
+    post_config = load_audio_postprocess_config(args.lang, args.voice_id)
+    mux_video_audio(video_only, full_audio, output_path, post_config)
 
     final_dur = get_duration(output_path)
     size_mb = output_path.stat().st_size / (1024 * 1024)

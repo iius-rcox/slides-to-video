@@ -89,3 +89,63 @@ This runs before `preprocess_tts_text()` (which handles brand-name replacements)
 ```
 raw text → normalize_for_tts(text, normalization) → preprocess_tts_text(text, replacements) → ElevenLabs TTS
 ```
+
+
+## Assembly Audio Post-Processing Presets
+
+`assemble_video.py` consumes optional post-processing settings from `lang_config.json` under each language's `audio_postprocessing` key, plus optional `voice_overrides.<voice_id>.audio_postprocessing` blocks.
+
+### Supported Controls
+
+| Key | Purpose | Typical Range |
+|-----|---------|---------------|
+| `presence_eq.gain_db` | Presence lift around 3kHz for intelligibility | `0.0` to `2.0` dB |
+| `presence_eq.enabled` | Toggle presence EQ stage | `true/false` |
+| `highpass.frequency` | Cut low-frequency rumble | `60` to `110` Hz |
+| `highpass.enabled` | Toggle high-pass stage | `true/false` |
+| `limiter.intensity` | Limiter strength (higher = stricter peak control) | `0.0` to `1.0` |
+| `deesser.enabled` + `deesser.intensity` | Optional sibilance control for harsh “s” voices | `0.15` to `0.45` |
+| `loudnorm.two_pass` | Two-pass loudness normalization for long-form consistency | `true/false` |
+
+### Recommended Presets
+
+- **General narration (default)**
+  - `presence_eq.gain_db: 1.2-1.5`
+  - `highpass.frequency: 80-90`
+  - `limiter.intensity: 0.9-1.0`
+  - `deesser.enabled: false`
+  - `loudnorm.two_pass: false`
+
+- **Sibilant voice / harsh highs**
+  - `deesser.enabled: true`, `deesser.intensity: 0.25-0.40`
+  - reduce `presence_eq.gain_db` to `0.6-1.0`
+  - keep `highpass.frequency` near `80-90`
+
+- **Long-form training (>15 min)**
+  - keep normal EQ/high-pass settings
+  - set `loudnorm.two_pass: true` for better inter-slide loudness stability
+  - optionally lower `limiter.intensity` slightly (`0.75-0.9`) to preserve dynamics
+
+### Override Example (`lang_config.json`)
+
+```json
+{
+  "en": {
+    "audio_postprocessing": {
+      "presence_eq": { "enabled": true, "gain_db": 1.4 },
+      "highpass": { "enabled": true, "frequency": 80 },
+      "limiter": { "enabled": true, "intensity": 0.95 },
+      "loudnorm": { "enabled": true, "two_pass": false, "I": -16, "LRA": 11, "TP": -1.5 }
+    },
+    "voice_overrides": {
+      "SIBILANT_EN_SAMPLE": {
+        "audio_postprocessing": {
+          "deesser": { "enabled": true, "intensity": 0.35, "frequency": 6200 },
+          "presence_eq": { "gain_db": 0.8 },
+          "loudnorm": { "two_pass": true }
+        }
+      }
+    }
+  }
+}
+```
