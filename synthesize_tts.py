@@ -18,6 +18,8 @@ import os
 import re
 import struct
 import sys
+import wave
+from array import array
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -31,6 +33,10 @@ TTS_MODEL = "eleven_multilingual_v2"
 # pcm_44100 = uncompressed 16-bit PCM at 44.1kHz — best quality, no compression artifacts.
 # Output is raw PCM bytes, not a WAV file — we wrap it in a WAV header below.
 OUTPUT_FORMAT = "pcm_44100"
+EXPECTED_SAMPLE_RATE = 44100
+EXPECTED_CHANNELS = 1
+MIN_DURATION_SECONDS = 0.25
+MIN_PEAK_AMPLITUDE = 8
 
 # Hardcoded fallbacks — used when lang_config.json is missing or incomplete
 DEFAULT_VOICES = {
@@ -163,6 +169,47 @@ def pcm_to_wav(pcm_bytes: bytes, sample_rate: int = 44100, channels: int = 1, bi
     return header + pcm_bytes
 
 
+def is_valid_audio(path: Path) -> tuple[bool, str]:
+    """Validate that a WAV file looks structurally and acoustically sane.
+
+    Checks RIFF/WAV parseability, expected format metadata, minimum duration,
+    and a small peak-amplitude threshold to catch fully silent/corrupt output.
+    """
+    if not path.exists():
+        return False, "missing file"
+
+    try:
+        with wave.open(str(path), "rb") as wav_file:
+            sample_rate = wav_file.getframerate()
+            channels = wav_file.getnchannels()
+            sample_width = wav_file.getsampwidth()
+            frame_count = wav_file.getnframes()
+            frames = wav_file.readframes(frame_count)
+    except (wave.Error, EOFError, OSError) as exc:
+        return False, f"invalid WAV parse: {exc}"
+
+    if sample_rate != EXPECTED_SAMPLE_RATE:
+        return False, f"unexpected sample rate {sample_rate} (expected {EXPECTED_SAMPLE_RATE})"
+
+    if channels != EXPECTED_CHANNELS:
+        return False, f"unexpected channels {channels} (expected {EXPECTED_CHANNELS})"
+
+    if sample_width != 2:
+        return False, f"unexpected sample width {sample_width * 8} bits (expected 16 bits)"
+
+    duration = frame_count / float(sample_rate) if sample_rate else 0.0
+    if duration < MIN_DURATION_SECONDS:
+        return False, f"duration too short ({duration:.3f}s < {MIN_DURATION_SECONDS:.3f}s)"
+
+    samples = array("h")
+    samples.frombytes(frames)
+    peak = max((abs(sample) for sample in samples), default=0)
+    if peak < MIN_PEAK_AMPLITUDE:
+        return False, f"peak amplitude too low ({peak} < {MIN_PEAK_AMPLITUDE})"
+
+    return True, "ok"
+
+
 def synthesize_slide(
     text: str,
     voice_id: str,
@@ -215,6 +262,7 @@ def main():
     parser.add_argument("audio_dir", help="Output directory for audio files")
     parser.add_argument("--voice-id", default=None, help="ElevenLabs voice ID")
     parser.add_argument("--lang", default="en", help="Language code for default voice")
+    parser.add_argument("--force", action="store_true", help="Regenerate all slide audio, even if valid files exist")
     args = parser.parse_args()
 
     notes_path = Path(args.notes_json)
@@ -256,9 +304,14 @@ def main():
             print(f"  Slide {sn}: (silent - no notes)")
             continue
 
-        if audio_file.exists():
-            print(f"  Slide {sn}: already exists, skipping")
-            continue
+        if args.force:
+            print(f"  Slide {sn}: force enabled, regenerating")
+        else:
+            valid_audio, reason = is_valid_audio(audio_file)
+            if valid_audio:
+                print(f"  Slide {sn}: already exists and valid, skipping")
+                continue
+            print(f"  Slide {sn}: existing audio invalid ({reason}), regenerating")
 
         print(f"  Slide {sn}: synthesizing ({len(text)} chars)...")
         synthesize_slide(
