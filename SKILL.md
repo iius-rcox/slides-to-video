@@ -101,6 +101,7 @@ PPTX ──> [Optional: Translate text + notes + SmartArt]
 
 1. Open the PPTX with `python-pptx`
 2. **Load glossary** from `glossary_en_es.json` — provides canonical term translations and never-translate list
+2. **Run glossary lint gate**: `python validate_glossary.py glossary_en_es.json` (blocks conflicting entries before translation starts)
 3. Walk all slides -> shapes -> text frames -> **paragraphs** (not individual runs)
 4. For each shape, detect its **role** (`title`, `subtitle`, `body`) using `PP_PLACEHOLDER` types
 5. **Collect text at paragraph level** using `||N||` run boundary markers to preserve run structure. This ensures Claude translates complete sentences, not run fragments.
