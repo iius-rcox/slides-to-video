@@ -14,12 +14,14 @@ Voice quality improvements over baseline:
 from __future__ import annotations
 
 import json
+import math
 import os
+import random
 import re
 import struct
 import sys
+import time
 import wave
-from array import array
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -33,10 +35,14 @@ TTS_MODEL = "eleven_multilingual_v2"
 # pcm_44100 = uncompressed 16-bit PCM at 44.1kHz — best quality, no compression artifacts.
 # Output is raw PCM bytes, not a WAV file — we wrap it in a WAV header below.
 OUTPUT_FORMAT = "pcm_44100"
-EXPECTED_SAMPLE_RATE = 44100
-EXPECTED_CHANNELS = 1
-MIN_DURATION_SECONDS = 0.25
-MIN_PEAK_AMPLITUDE = 8
+
+DEFAULT_RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
+DEFAULT_API_MAX_RETRIES = 5
+DEFAULT_API_BACKOFF_BASE_SEC = 1.0
+DEFAULT_API_BACKOFF_MAX_SEC = 20.0
+DEFAULT_API_BACKOFF_JITTER_SEC = 0.5
+DEFAULT_SLIDE_MAX_RETRIES = 2
+DEFAULT_MIN_WAV_DURATION_SEC = 0.35
 
 # Hardcoded fallbacks — used when lang_config.json is missing or incomplete
 DEFAULT_VOICES = {
@@ -169,47 +175,6 @@ def pcm_to_wav(pcm_bytes: bytes, sample_rate: int = 44100, channels: int = 1, bi
     return header + pcm_bytes
 
 
-def is_valid_audio(path: Path) -> tuple[bool, str]:
-    """Validate that a WAV file looks structurally and acoustically sane.
-
-    Checks RIFF/WAV parseability, expected format metadata, minimum duration,
-    and a small peak-amplitude threshold to catch fully silent/corrupt output.
-    """
-    if not path.exists():
-        return False, "missing file"
-
-    try:
-        with wave.open(str(path), "rb") as wav_file:
-            sample_rate = wav_file.getframerate()
-            channels = wav_file.getnchannels()
-            sample_width = wav_file.getsampwidth()
-            frame_count = wav_file.getnframes()
-            frames = wav_file.readframes(frame_count)
-    except (wave.Error, EOFError, OSError) as exc:
-        return False, f"invalid WAV parse: {exc}"
-
-    if sample_rate != EXPECTED_SAMPLE_RATE:
-        return False, f"unexpected sample rate {sample_rate} (expected {EXPECTED_SAMPLE_RATE})"
-
-    if channels != EXPECTED_CHANNELS:
-        return False, f"unexpected channels {channels} (expected {EXPECTED_CHANNELS})"
-
-    if sample_width != 2:
-        return False, f"unexpected sample width {sample_width * 8} bits (expected 16 bits)"
-
-    duration = frame_count / float(sample_rate) if sample_rate else 0.0
-    if duration < MIN_DURATION_SECONDS:
-        return False, f"duration too short ({duration:.3f}s < {MIN_DURATION_SECONDS:.3f}s)"
-
-    samples = array("h")
-    samples.frombytes(frames)
-    peak = max((abs(sample) for sample in samples), default=0)
-    if peak < MIN_PEAK_AMPLITUDE:
-        return False, f"peak amplitude too low ({peak} < {MIN_PEAK_AMPLITUDE})"
-
-    return True, "ok"
-
-
 def synthesize_slide(
     text: str,
     voice_id: str,
@@ -254,6 +219,192 @@ def synthesize_slide(
         f.write(wav_bytes)
 
 
+def _read_int_env(name: str, default: int, minimum: int = 0) -> int:
+    """Read integer env var with bounds and default fallback."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+        return max(value, minimum)
+    except ValueError:
+        print(f"  Warning: invalid {name}={raw!r}, using default {default}")
+        return default
+
+
+def _read_float_env(name: str, default: float, minimum: float = 0.0) -> float:
+    """Read float env var with bounds and default fallback."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+        return max(value, minimum)
+    except ValueError:
+        print(f"  Warning: invalid {name}={raw!r}, using default {default}")
+        return default
+
+
+def _extract_status_code(exc: Exception) -> int | None:
+    """Best-effort extraction of HTTP status code from ElevenLabs/HTTP exceptions."""
+    for attr in ("status_code", "http_status", "code"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, int):
+            return value
+    response = getattr(exc, "response", None)
+    if response is not None:
+        response_status = getattr(response, "status_code", None)
+        if isinstance(response_status, int):
+            return response_status
+    return None
+
+
+def _is_retryable_api_error(exc: Exception, retryable_statuses: set[int]) -> bool:
+    """Classify transient API failures eligible for retry."""
+    if isinstance(exc, TimeoutError):
+        return True
+
+    status = _extract_status_code(exc)
+    if status in retryable_statuses:
+        return True
+
+    name = exc.__class__.__name__.lower()
+    message = str(exc).lower()
+    transient_markers = (
+        "timeout",
+        "temporar",
+        "too many requests",
+        "rate limit",
+        "connection reset",
+        "connection aborted",
+        "service unavailable",
+        "gateway",
+    )
+    return any(marker in name or marker in message for marker in transient_markers)
+
+
+def _compute_backoff(attempt: int, base_sec: float, max_sec: float, jitter_sec: float) -> float:
+    """Exponential backoff with additive jitter."""
+    exp = base_sec * math.pow(2, max(0, attempt - 1))
+    jitter = random.uniform(0.0, jitter_sec)
+    return min(max_sec, exp + jitter)
+
+
+def _validate_wav(path: Path, min_duration_sec: float) -> tuple[bool, str]:
+    """Validate generated WAV file (non-empty, readable header, minimum duration)."""
+    if not path.exists():
+        return False, "file was not created"
+    if path.stat().st_size <= 44:
+        return False, "file is empty or only contains a WAV header"
+
+    try:
+        with wave.open(str(path), "rb") as wav_file:
+            frame_count = wav_file.getnframes()
+            sample_rate = wav_file.getframerate()
+            channels = wav_file.getnchannels()
+            sample_width = wav_file.getsampwidth()
+    except wave.Error as exc:
+        return False, f"invalid WAV header/content: {exc}"
+    except OSError as exc:
+        return False, f"unable to read WAV file: {exc}"
+
+    if frame_count <= 0:
+        return False, "WAV has zero frames"
+    if sample_rate <= 0:
+        return False, "WAV reports invalid sample rate"
+    if channels <= 0 or sample_width <= 0:
+        return False, "WAV reports invalid channel/sample-width metadata"
+
+    duration_sec = frame_count / float(sample_rate)
+    if duration_sec < min_duration_sec:
+        return False, f"duration {duration_sec:.3f}s below minimum {min_duration_sec:.3f}s"
+
+    return True, f"ok ({duration_sec:.2f}s)"
+
+
+def synthesize_with_retries(
+    *,
+    slide_number: int,
+    text: str,
+    voice_id: str,
+    output_path: Path,
+    client: ElevenLabs,
+    voice_settings: VoiceSettings,
+    normalization: dict[str, str],
+    replacements: dict[str, str] | None,
+    retryable_statuses: set[int],
+    api_max_retries: int,
+    api_backoff_base_sec: float,
+    api_backoff_max_sec: float,
+    api_backoff_jitter_sec: float,
+    slide_max_retries: int,
+    min_wav_duration_sec: float,
+) -> tuple[bool, str]:
+    """Synthesize one slide with API retries + output validation retries."""
+    validation_attempts = slide_max_retries + 1
+
+    for validation_attempt in range(1, validation_attempts + 1):
+        if output_path.exists():
+            output_path.unlink()
+
+        for api_attempt in range(1, api_max_retries + 1):
+            try:
+                synthesize_slide(
+                    text,
+                    voice_id,
+                    output_path,
+                    client,
+                    voice_settings=voice_settings,
+                    normalization=normalization,
+                    replacements=replacements,
+                )
+                break
+            except Exception as exc:
+                retryable = _is_retryable_api_error(exc, retryable_statuses)
+                status = _extract_status_code(exc)
+                if retryable and api_attempt < api_max_retries:
+                    delay = _compute_backoff(
+                        api_attempt,
+                        api_backoff_base_sec,
+                        api_backoff_max_sec,
+                        api_backoff_jitter_sec,
+                    )
+                    status_info = f"status={status}" if status is not None else "status=unknown"
+                    print(
+                        f"    API retry {api_attempt}/{api_max_retries - 1} for slide {slide_number} "
+                        f"({status_info}, {exc.__class__.__name__}: {exc}); sleeping {delay:.2f}s"
+                    )
+                    time.sleep(delay)
+                    continue
+
+                status_info = f"status={status}" if status is not None else "status=unknown"
+                action = (
+                    "retry exhausted" if retryable else "non-retryable API error"
+                )
+                return False, (
+                    f"{action} ({status_info}, {exc.__class__.__name__}: {exc}). "
+                    "Check ELEVENLABS_API_KEY, voice_id, and service status."
+                )
+
+        valid, validation_msg = _validate_wav(output_path, min_wav_duration_sec)
+        if valid:
+            return True, validation_msg
+
+        if validation_attempt < validation_attempts:
+            print(
+                f"    Validation failed for slide {slide_number} "
+                f"(attempt {validation_attempt}/{validation_attempts}): {validation_msg}. Re-synthesizing..."
+            )
+            continue
+
+        return False, (
+            f"audio validation failed after {validation_attempts} attempts: {validation_msg}. "
+            "Review source notes (too short/empty), lower minimum duration, or retry later."
+        )
+
+    return False, "unexpected retry loop exit"
+
+
 def main():
     import argparse
 
@@ -262,7 +413,6 @@ def main():
     parser.add_argument("audio_dir", help="Output directory for audio files")
     parser.add_argument("--voice-id", default=None, help="ElevenLabs voice ID")
     parser.add_argument("--lang", default="en", help="Language code for default voice")
-    parser.add_argument("--force", action="store_true", help="Regenerate all slide audio, even if valid files exist")
     args = parser.parse_args()
 
     notes_path = Path(args.notes_json)
@@ -284,6 +434,22 @@ def main():
     print(f"  Normalization rules: {len(normalization)}")
     print(f"  TTS replacements: {len(replacements) if replacements else 'default'}")
 
+    retryable_statuses = DEFAULT_RETRYABLE_STATUSES
+    api_max_retries = _read_int_env("TTS_API_MAX_RETRIES", DEFAULT_API_MAX_RETRIES, minimum=1)
+    api_backoff_base_sec = _read_float_env("TTS_API_BACKOFF_BASE_SEC", DEFAULT_API_BACKOFF_BASE_SEC, minimum=0.0)
+    api_backoff_max_sec = _read_float_env("TTS_API_BACKOFF_MAX_SEC", DEFAULT_API_BACKOFF_MAX_SEC, minimum=0.0)
+    api_backoff_jitter_sec = _read_float_env("TTS_API_BACKOFF_JITTER_SEC", DEFAULT_API_BACKOFF_JITTER_SEC, minimum=0.0)
+    slide_max_retries = _read_int_env("TTS_SLIDE_MAX_RETRIES", DEFAULT_SLIDE_MAX_RETRIES, minimum=0)
+    min_wav_duration_sec = _read_float_env("TTS_MIN_WAV_DURATION_SEC", DEFAULT_MIN_WAV_DURATION_SEC, minimum=0.0)
+
+    print(f"  API retries: {api_max_retries} (statuses={sorted(retryable_statuses)})")
+    print(
+        f"  Backoff: base={api_backoff_base_sec:.2f}s, max={api_backoff_max_sec:.2f}s, "
+        f"jitter={api_backoff_jitter_sec:.2f}s"
+    )
+    print(f"  Slide validation retries: {slide_max_retries}")
+    print(f"  Minimum WAV duration: {min_wav_duration_sec:.2f}s")
+
     with open(notes_path, "r", encoding="utf-8") as f:
         notes = json.load(f)
 
@@ -293,6 +459,8 @@ def main():
         sys.exit(1)
 
     client = ElevenLabs(api_key=api_key)
+
+    failures: list[tuple[int, str]] = []
 
     for note in notes:
         sn = note["slide"]
@@ -304,23 +472,43 @@ def main():
             print(f"  Slide {sn}: (silent - no notes)")
             continue
 
-        if args.force:
-            print(f"  Slide {sn}: force enabled, regenerating")
-        else:
-            valid_audio, reason = is_valid_audio(audio_file)
-            if valid_audio:
-                print(f"  Slide {sn}: already exists and valid, skipping")
-                continue
-            print(f"  Slide {sn}: existing audio invalid ({reason}), regenerating")
+        if audio_file.exists():
+            print(f"  Slide {sn}: [skip] already exists -> {audio_file.name}")
+            continue
 
-        print(f"  Slide {sn}: synthesizing ({len(text)} chars)...")
-        synthesize_slide(
-            text, voice_id, audio_file, client,
+        print(f"  Slide {sn}: [start] synthesizing ({len(text)} chars)...")
+        ok, message = synthesize_with_retries(
+            slide_number=sn,
+            text=text,
+            voice_id=voice_id,
+            output_path=audio_file,
+            client=client,
             voice_settings=voice_settings,
             normalization=normalization,
             replacements=replacements,
+            retryable_statuses=retryable_statuses,
+            api_max_retries=api_max_retries,
+            api_backoff_base_sec=api_backoff_base_sec,
+            api_backoff_max_sec=api_backoff_max_sec,
+            api_backoff_jitter_sec=api_backoff_jitter_sec,
+            slide_max_retries=slide_max_retries,
+            min_wav_duration_sec=min_wav_duration_sec,
         )
-        print(f"  Slide {sn}: done -> {audio_file.name}")
+        if ok:
+            print(f"  Slide {sn}: [ok] {audio_file.name} ({message})")
+        else:
+            failures.append((sn, message))
+            print(f"  Slide {sn}: [failed] {message}")
+
+    if failures:
+        print("\nTTS synthesis finished with failures:")
+        for sn, reason in failures:
+            print(f"  - Slide {sn}: {reason}")
+        print(
+            "Action: fix failed slides (notes/voice/config), then rerun synthesize_tts.py; "
+            "existing successful WAV files will be reused."
+        )
+        sys.exit(1)
 
     print(f"\nTTS synthesis complete. Audio files in: {audio_dir}")
 

@@ -196,6 +196,98 @@ def check_bullet_structure(original_texts, translated_texts):
     return warnings
 ```
 
+### 4b. PPTX-Native Paragraph/List Structure Preservation (WARNING)
+
+For higher accuracy, use **PPTX paragraph metadata** instead of glyph regexes. Compare source and translated PPTX files at the paragraph level for each text frame — checking paragraph count, bullet on/off state (`<a:buNone>` vs inherited/default bullet), and indentation/list level.
+
+```python
+from collections import defaultdict
+
+
+def _iter_text_frame_paragraphs(prs):
+    """Yield paragraph metadata from slide text frames and table cells."""
+    for slide_idx, slide in enumerate(prs.slides, start=1):
+        for shape_idx, shape in enumerate(slide.shapes):
+            if getattr(shape, "has_text_frame", False) and shape.has_text_frame:
+                tf = shape.text_frame
+                for para_idx, para in enumerate(tf.paragraphs):
+                    yield {
+                        "frame_key": f"slide {slide_idx}, shape {shape_idx}",
+                        "paragraph_index": para_idx,
+                        "level": para.level or 0,
+                        "bullet_enabled": not _paragraph_has_bu_none(para),
+                    }
+            if getattr(shape, "has_table", False) and shape.has_table:
+                for row_idx, row in enumerate(shape.table.rows):
+                    for col_idx, cell in enumerate(row.cells):
+                        if not cell.text_frame:
+                            continue
+                        for para_idx, para in enumerate(cell.text_frame.paragraphs):
+                            yield {
+                                "frame_key": f"slide {slide_idx}, table {shape_idx}, cell {row_idx},{col_idx}",
+                                "paragraph_index": para_idx,
+                                "level": para.level or 0,
+                                "bullet_enabled": not _paragraph_has_bu_none(para),
+                            }
+
+
+def _paragraph_has_bu_none(paragraph):
+    """True when paragraph explicitly disables bullets (<a:buNone/>)."""
+    pPr = paragraph._p.pPr
+    if pPr is None:
+        return False
+    return pPr.find("{http://schemas.openxmlformats.org/drawingml/2006/main}buNone") is not None
+
+
+def collect_paragraph_structure(prs):
+    """Group per-paragraph metadata by text-frame key."""
+    grouped = defaultdict(list)
+    for meta in _iter_text_frame_paragraphs(prs):
+        grouped[meta["frame_key"]].append(meta)
+    return grouped
+
+
+def check_paragraph_structure(source_prs, translated_prs):
+    """WARNING if list/paragraph structure differs between source and translation."""
+    warnings = []
+    src = collect_paragraph_structure(source_prs)
+    trg = collect_paragraph_structure(translated_prs)
+
+    frame_keys = sorted(set(src.keys()) | set(trg.keys()))
+    for frame_key in frame_keys:
+        src_paras = src.get(frame_key, [])
+        trg_paras = trg.get(frame_key, [])
+
+        if len(src_paras) != len(trg_paras):
+            warnings.append({
+                "check": "paragraph_count",
+                "severity": "WARNING",
+                "location": frame_key,
+                "detail": f"Paragraph count changed: {len(src_paras)} → {len(trg_paras)}",
+            })
+            continue
+
+        for para_idx, (s, t) in enumerate(zip(src_paras, trg_paras)):
+            if s["bullet_enabled"] != t["bullet_enabled"]:
+                warnings.append({
+                    "check": "bullet_state",
+                    "severity": "WARNING",
+                    "location": f"{frame_key}, paragraph {para_idx}",
+                    "detail": f"Bullet enabled changed: {s['bullet_enabled']} → {t['bullet_enabled']}",
+                })
+            if s["level"] != t["level"]:
+                warnings.append({
+                    "check": "list_level",
+                    "severity": "WARNING",
+                    "location": f"{frame_key}, paragraph {para_idx}",
+                    "detail": f"List level changed: {s['level']} → {t['level']}",
+                })
+
+    return warnings
+```
+
+Test fixtures for paragraph structure checks are in `fixtures/translation_qa/`.
+
 ### 5. Title Length Budget (ERROR)
 
 Titles (role="title") must not exceed 5 words. Subtitles (role="subtitle") must not exceed 8 words. Body text must not exceed 120% of source word count.
