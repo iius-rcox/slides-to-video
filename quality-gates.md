@@ -40,11 +40,13 @@ Quality gates are validation checkpoints at each stage of the PPTX-to-video pipe
 | Output JSON is valid | CRITICAL | `notes_refined.json` parses as valid JSON array |
 | Slide count preserved | CRITICAL | Same number of entries as `notes.json` |
 | Empty slides stay empty | CRITICAL | Slides empty in original are empty in refined |
+| Refinement is targeted | CRITICAL | Only slides flagged by per-slide scoring are rewritten |
+| Trigger heuristics are specific | WARNING | Uses weighted UI-instruction cues; excludes broad lexical phrases (e.g., "in the") |
 | Per-slide word cap (10-55) | WARNING | Each non-empty slide has 10-55 words |
 | No new steps introduced | WARNING | Step count ≤ original per slide |
 | Content word overlap ≥ 30% | WARNING | Refined text maintains semantic similarity |
 
-**On CRITICAL failure:** Fall back to original `notes.json` for the entire pipeline.
+**On CRITICAL failure:** Fall back to original note on the affected slide(s); preserve refined text on other validated slides.
 **On WARNING failure:** Fall back to original note for that specific slide only.
 
 ## Gate 4: Post-Export
