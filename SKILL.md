@@ -171,7 +171,22 @@ If translating, extract from the **translated** PPTX (not the original).
 **Performed by Claude Code (Opus) directly in-context. No external API needed.**
 **Validation rules:** See `./narration-refinement.md`
 
-**Trigger:** The `extract_notes.py` script reports whether robotic style was detected (60%+ of non-empty notes start with "Click on", "Navigate to", "Select the", etc.). If detected, Claude reads `notes.json` and rewrites each note as natural conversational narration.
+**Trigger (per-slide scoring, not all-or-nothing):** The `extract_notes.py` script reports candidate robotic style signals, then Claude scores each non-empty slide individually and only rewrites slides above threshold.
+
+Use weighted cues that favor true UI-instruction language:
+- **Strong cues (+3 each):** imperative UI verbs at clause start (`click`, `select`, `open`, `go to`, `navigate`, `choose`, `enter`, `type`) and direct UI-target phrases (`button`, `menu`, `dropdown`, `tab`, `panel`, `field`).
+- **Medium cues (+2 each):** explicit step sequencing (`Step 1`, `1.`, `2)`, `Next,`, `Then,`, `After that`) and short command chains.
+- **Light cues (+1 each):** repetitive command framing across consecutive sentences.
+- **Negative cues (-2 each):** explanatory narration patterns (`we'll cover`, `this slide shows`, `let's look at`, `in summary`) and conceptual/strategy language.
+
+Avoid broad lexical triggers (for example, generic prepositional phrases like **"in the"**) because they overfire on normal narration.
+
+**Default calibration:** refine only when a slide's score is **≥4**.
+
+**Calibration examples (should NOT trigger refinement):**
+- "In the next section, we'll review how the onboarding flow reduces setup time and where teams usually get blocked."
+- "This slide explains why we chose quarterly checkpoints and how we measure adoption after launch."
+- "As you can see in the chart, response time improved after the caching update."
 
 **What Claude fixes:**
 - Repetitive "Click on the X button" → varied phrasing ("Select X", "Go ahead and open X", "You'll want to click X")
@@ -198,10 +213,11 @@ Any validation failure falls back to the original note for that slide (non-block
 
 **Process:**
 1. Read `notes.json` from Step 2
-2. If robotic style detected (or user forces it), rewrite notes directly
-3. Run validation checklist on each refined note
-4. Write refined notes as `notes_refined.json` in work directory
-5. All subsequent steps (TTS, assembly) use `notes_refined.json` if it exists, else `notes.json`
+2. Score each non-empty slide for robotic UI-instruction style using the weighted cues above
+3. Rewrite only slides that cross the refinement threshold (or user-forced slides)
+4. Run validation checklist on each rewritten slide
+5. Merge rewritten slides with untouched originals and write `notes_refined.json` in work directory
+6. All subsequent steps (TTS, assembly) use `notes_refined.json` if it exists, else `notes.json`
 
 **Checkpoint:** If `notes_refined.json` exists, use it instead of re-running refinement. The original `notes.json` is always preserved for reference.
 
