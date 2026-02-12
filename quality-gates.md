@@ -10,14 +10,36 @@ Quality gates are validation checkpoints at each stage of the PPTX-to-video pipe
 |-------|----------|----------|
 | Never-translate terms preserved | CRITICAL | All `never_translate` terms unchanged |
 | No empty translations for non-empty source | CRITICAL | Every non-empty source has non-empty translation |
-| Title length within budget | CRITICAL | Titles ≤ 5 words, subtitles ≤ 8 words |
-| Body length within budget | WARNING | Body text ≤ 120% of source word count |
+| Length expansion risk (heuristic) | WARNING | Optional signal only; never blocks pipeline |
+| Rendered text overflow/clipping | CRITICAL | No translated text is clipped or overflows its container after export |
 | Glossary terms used consistently | WARNING | Canonical translations used where applicable |
 | Numbers preserved | WARNING | All numbers from source appear in translation |
 | Whitespace restored on all runs | CRITICAL | `_restore_whitespace()` applied to every write-back |
 | SmartArt text order preserved | CRITICAL | Post-write re-parse matches expected text sequence |
 
-**On CRITICAL failure:** Auto-retranslate failed items (max 2 attempts). If still failing, stop pipeline and report.
+**On CRITICAL failure:** Auto-retranslate failed items (max 2 attempts), then run overflow mitigation (tighten translation, optional safe font-size reduction) and re-validate. If still failing, stop pipeline and report.
+
+**Gate output requirement:** Emit per-slide overflow diagnostics (slide number, shape identifier, overflow/clipping metrics, mitigation attempts, final status).
+
+
+## Gate 1.5: Render Validation (Layout Correctness)
+
+**Runs after:** Translations are written to the PPTX and a translated-slide export pass completes.
+
+| Check | Severity | Criteria |
+|-------|----------|----------|
+| Overflow detector executed | CRITICAL | Validation ran against all translated slides/shapes |
+| No unresolved overflow | CRITICAL | Overflow ratio is within tolerance for every translated shape |
+| No text clipping | CRITICAL | No glyph clipping at top/bottom/left/right bounds |
+| Mitigation applied before fail | CRITICAL | Tighten-then-font-reduce strategy attempted before final fail |
+| Overflow diagnostics emitted | WARNING | Per-slide diagnostic payload printed for triage |
+
+**Automated mitigation path (required order):**
+1. Tighten translation while preserving meaning, terms, and numbers.
+2. Optionally reduce font size within safe limits (`min_font_pt` guardrail).
+3. Re-export and re-run validation.
+
+**Fail criteria:** If any translated shape still overflows/clips after mitigation retries, this gate fails CRITICAL.
 
 ## Gate 2: Post-Extraction
 

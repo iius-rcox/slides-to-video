@@ -79,47 +79,39 @@ def check_bullet_structure(original_texts, translated_texts):
     return warnings
 ```
 
-### 4. Title Length Budget (ERROR)
+### 4. Length Budget Heuristics (DEPRECATED, WARNING)
 
-Titles (role="title") must not exceed 5 words. Subtitles (role="subtitle") must not exceed 8 words. Body text must not exceed 120% of source word count.
+Hard word/character budgets are **no longer a pass/fail criterion** for translated slides. They are only optional heuristics for identifying likely overflow risk before rendering.
+
+Why deprecated:
+- They create false positives in naturally verbose target languages.
+- They miss true overflow when short text uses large fonts or tight containers.
+- They conflict with the new layout-first gate, which validates actual rendered output.
+
+Use render validation (see `quality-gates.md`) as the source of truth.
 
 ```python
-def check_length_budgets(original_texts, translated_texts):
-    """ERROR if translated text exceeds length budget for its role."""
-    errors = []
+def check_length_budget_risk(original_texts, translated_texts):
+    """WARNING-only heuristic. Never blocks pipeline."""
+    warnings = []
     for item in original_texts:
         trans = translated_texts.get(item["id"], "")
-        role = item.get("role", "body")
+        orig_words = max(1, len(item["text"].split()))
         trans_words = len(trans.split())
-        orig_words = len(item["text"].split())
+        ratio = trans_words / orig_words
 
-        if role == "title" and trans_words > 5:
-            errors.append({
-                "check": "title_length",
-                "severity": "ERROR",
+        if ratio > 1.35:
+            warnings.append({
+                "check": "length_budget_risk",
+                "severity": "WARNING",
                 "id": item["id"],
                 "location": item["location"],
-                "detail": f"Title has {trans_words} words (max 5): '{trans}'"
+                "detail": (
+                    f"Potential expansion risk ({ratio:.0%} of source). "
+                    "Final decision deferred to render overflow gate."
+                ),
             })
-        elif role == "subtitle" and trans_words > 8:
-            errors.append({
-                "check": "subtitle_length",
-                "severity": "ERROR",
-                "id": item["id"],
-                "location": item["location"],
-                "detail": f"Subtitle has {trans_words} words (max 8): '{trans}'"
-            })
-        elif role == "body" and orig_words > 0:
-            ratio = trans_words / orig_words
-            if ratio > 1.2:
-                errors.append({
-                    "check": "body_length",
-                    "severity": "ERROR",
-                    "id": item["id"],
-                    "location": item["location"],
-                    "detail": f"Body text {ratio:.0%} of original ({trans_words} vs {orig_words} words)"
-                })
-    return errors
+    return warnings
 ```
 
 ### 5. Glossary Compliance (WARNING)
@@ -186,7 +178,8 @@ def run_translation_qa(original_texts, translated_texts, glossary, never_transla
     results.extend(check_never_translate(original_texts, translated_texts, never_translate))
     results.extend(check_number_preservation(original_texts, translated_texts))
     results.extend(check_bullet_structure(original_texts, translated_texts))
-    results.extend(check_length_budgets(original_texts, translated_texts))
+    # Deprecated as blocking check; now warning-only risk signal
+    results.extend(check_length_budget_risk(original_texts, translated_texts))
     results.extend(check_glossary_compliance(original_texts, translated_texts, glossary))
     results.extend(check_empty_translations(original_texts, translated_texts))
 

@@ -9,17 +9,21 @@ Detailed solutions for common issues encountered during the PPTX-to-narrated-vid
 
 **Cause:** Claude received a flat list of text runs without structural context.
 
-**Fix:** Ensure `_shape_role()` is detecting title placeholders and the "role" field is included in the translation payload. The translation prompt must have the "Slide Structure" section with hard length budgets: titles ≤ 5 words, subtitles ≤ 8 words.
+**Fix:** Ensure `_shape_role()` is detecting title placeholders and the "role" field is included in the translation payload. Prioritize preserving heading intent and hierarchy; final fit is validated by render overflow checks (not hard word-count budgets).
 
 ### Text overflow on translated slides
 **Symptom:** Translated text extends beyond the text box boundary.
 
-**Cause:** Target language text is longer than English (e.g., Spanish is ~15-20% longer).
+**Cause:** Text fits semantically but not spatially in the rendered layout (font size, box geometry, line breaks, and language expansion all interact).
 
 **Fix options:**
-1. The length budget system should catch this automatically (body text ≤ 120% of source). Check that `check_length_budgets()` is running and auto-retranslating violations.
-2. Use per-slide retranslation with stricter length constraints
-3. Reduce font size in the PPTX before exporting (requires python-pptx font manipulation)
+1. Run the **render validation step** after applying translations: export translated slides and detect textbox overflow/clipping.
+2. Inspect per-slide diagnostics (slide number, shape id/name, overflow ratio, clipped edges).
+3. Auto-mitigate failed shapes in this order:
+   - **Tighten translation** (shorter rewrite preserving meaning and glossary terms).
+   - **Optional font-size reduction** within safe limits (e.g., decrement 0.5-1.0 pt, never below configured minimum).
+4. Re-export and re-validate until pass or retry budget is exhausted.
+5. If still failing, mark gate CRITICAL and stop before TTS/assembly.
 
 ### "Visiony" whitespace concatenation bug
 **Symptom:** Words run together in the translated PPTX (e.g., "Visiony Mision" instead of "Vision y Mision").
@@ -83,15 +87,15 @@ Add a post-write regression check: after writing translations back, re-parse the
 If retries keep failing, reduce the character target in `estimate_batch_size()`.
 
 ### Translation QA check failures
-**Symptom:** QA checks report errors after translation (never-translate violations, length budget exceedances, empty translations).
+**Symptom:** QA checks report errors after translation (never-translate violations, empty translations, glossary/number warnings) and/or render gate reports overflow.
 
 **Cause:** Various — see `translation-qa.md` for the 6 automated checks.
 
 **Fix:** ERROR-severity items are automatically retranslated (max 2 attempts). If errors persist:
 1. Check the glossary (`glossary_en_es.json`) for correctness
 2. Verify the translation prompt includes `{GLOSSARY_ENTRIES}` and `{NEVER_TRANSLATE_LIST}` placeholders
-3. For persistent length budget violations, the target language may need longer phrasing — consider relaxing the body budget from 120% to 130%
-4. Review `translation-qa.md` for details on each check
+3. For overflow failures, use automated mitigation (tighten translation first, then safe font reduction).
+4. Review `translation-qa.md` and `quality-gates.md` for current gate definitions.
 
 ### Glossary terms not used consistently
 **Symptom:** Translation uses different terms for the same concept across slides.
@@ -262,7 +266,7 @@ Always wrap COM operations in `try/finally` with proper cleanup.
 **Cause:** A CRITICAL-severity check failed. See `quality-gates.md` for the full gate definitions.
 
 **Fix:** Each gate has specific recovery steps:
-- **Post-Translation gate:** Auto-retranslates failed items (max 2 attempts), then stops if still failing
+- **Post-Translation gate:** Auto-retranslates failed items (max 2 attempts), then runs render validation and overflow mitigation before deciding pass/fail
 - **Post-Extraction gate:** Re-runs extraction; if fails again, check the PPTX file for corruption
 - **Post-Refinement gate:** Falls back to original `notes.json`
 - **Post-Export gate:** Kills PowerPoint COM and re-exports; tries LibreOffice fallback
@@ -276,7 +280,7 @@ Always wrap COM operations in `try/finally` with proper cleanup.
 
 **Fix:** Review the logged warnings after pipeline completion. Common patterns:
 - Many glossary compliance warnings → update the glossary or relax compliance checking
-- Many body length warnings → target language is naturally more verbose; consider raising the 120% threshold
+- Many overflow warnings/failures on same template → increase container size or adjust base font in the source deck
 - Audio duration warnings → some slides may have too much or too little narration
 
 ## Environment Issues

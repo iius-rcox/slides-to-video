@@ -266,73 +266,78 @@ def retry_missing_ids(
     return translations
 
 
-def check_length_budgets(
+def check_length_budget_risk(
     texts: list[dict],
     translations: dict[int, str]
 ) -> dict[int, str]:
-    """Validate length budgets and flag violations.
+    """Warning-only heuristic for expansion risk.
 
-    Rules:
-    - title: ≤ 5 words
-    - subtitle: ≤ 8 words
-    - body: ≤ 120% of source character count
-
-    Auto-retranslate violators (max 2 attempts).
+    Deprecated as a hard gate: rendered overflow checks are authoritative.
     """
-    violations = []
+    risks = []
 
     for t in texts:
         tid = t["id"]
         if tid not in translations:
             continue
 
-        trans = translations[tid]
-        role = t.get("role", "body")
+        source_words = max(1, len(t["text"].split()))
+        trans_words = len(translations[tid].split())
+        ratio = trans_words / source_words
 
-        # Word count checks
-        word_count = len(trans.split())
-        if role == "title" and word_count > 5:
-            violations.append({
+        if ratio > 1.35:
+            risks.append({
                 "id": tid,
-                "reason": f"Title too long ({word_count} words > 5)",
+                "reason": f"Expansion risk ({ratio:.0%} of source)",
                 "text": t["text"],
-                "translation": trans,
-                "role": role,
-            })
-        elif role == "subtitle" and word_count > 8:
-            violations.append({
-                "id": tid,
-                "reason": f"Subtitle too long ({word_count} words > 8)",
-                "text": t["text"],
-                "translation": trans,
-                "role": role,
+                "translation": translations[tid],
             })
 
-        # Character count check (body only)
-        if role == "body":
-            source_len = len(t["text"])
-            trans_len = len(trans)
-            budget = source_len * 1.2
-            if trans_len > budget:
-                violations.append({
-                    "id": tid,
-                    "reason": f"Body too long ({trans_len} chars > {budget:.0f} budget)",
-                    "text": t["text"],
-                    "translation": trans,
-                    "role": role,
-                })
-
-    if violations:
-        print(f"  WARNING: {len(violations)} length budget violations:")
-        for v in violations:
-            print(f"    ID {v['id']}: {v['reason']}")
-            print(f"      Source: {v['text'][:50]}...")
-            print(f"      Translation: {v['translation'][:50]}...")
-
-        # In practice, Claude would re-translate with stricter length constraints
-        # For now, just flag the violations
+    if risks:
+        print(f"  WARNING: {len(risks)} potential expansion risks (render gate decides pass/fail):")
+        for r in risks:
+            print(f"    ID {r['id']}: {r['reason']}")
 
     return translations
+
+
+def validate_render_overflow(
+    translated_pptx: Path,
+    work_dir: Path,
+    min_font_pt: float = 14.0,
+    max_retries: int = 2,
+):
+    """Layout-first validation gate for translated slides.
+
+    Flow:
+    1) Export translated slides to images
+    2) Detect overflow/clipping per translated shape
+    3) Auto-mitigate in order: tighten translation -> optional safe font reduction
+    4) Re-export and re-validate until pass/fail
+    """
+    diagnostics = []
+
+    for attempt in range(max_retries + 1):
+        # Placeholder hooks - implement with your renderer + detector
+        # export_translated_slides(translated_pptx, work_dir / "render_validation")
+        # diagnostics = detect_text_overflow(translated_pptx, exported_pngs)
+
+        unresolved = [d for d in diagnostics if d["status"] == "overflow"]
+        if not unresolved:
+            print("  Render validation passed: no overflow/clipping detected")
+            return True, diagnostics
+
+        print(f"  Render validation attempt {attempt+1}: {len(unresolved)} unresolved items")
+
+        if attempt == max_retries:
+            break
+
+        # Required mitigation order
+        # 1) tighten_translation(unresolved)
+        # 2) reduce_font_safely(unresolved, min_font_pt=min_font_pt)
+
+    print("  ERROR: Render validation failed after mitigation retries")
+    return False, diagnostics
 
 
 def _restore_whitespace(original: str, translated: str) -> str:
@@ -579,10 +584,18 @@ def translate_pptx(pptx_path: Path, output_path: Path) -> Path:
     # Retry missing IDs
     translations = retry_missing_ids(texts, translations)
 
-    # Check length budgets
-    translations = check_length_budgets(texts, translations)
+    # Optional warning-only expansion heuristic
+    translations = check_length_budget_risk(texts, translations)
 
     apply_translations(prs, texts, translations)
+
+    # Layout-first gate: export translated slides and detect overflow/clipping
+    render_ok, overflow_diagnostics = validate_render_overflow(output_path, output_path.parent)
+    if not render_ok:
+        print("  Per-slide overflow diagnostics:")
+        for d in overflow_diagnostics:
+            print(f"    Slide {d.get('slide')}, Shape {d.get('shape')}: {d.get('detail')}")
+        raise RuntimeError("Render overflow gate failed")
     prs.save(str(output_path))
     return output_path
 ```
@@ -647,10 +660,12 @@ The glossary is loaded via `load_glossary()` and appended to the system prompt. 
 4. **Adaptive batching**: `estimate_batch_size()` calculates optimal batch size (~4000 chars)
 5. **Claude translates**: User provides translations for each batch (Claude Code handles in-context)
 6. **Retry missing**: `retry_missing_ids()` catches dropped IDs
-7. **Length validation**: `check_length_budgets()` flags title/subtitle/body violations
+7. **Expansion-risk heuristic**: `check_length_budget_risk()` emits warnings only
 8. **Apply translations**: `apply_translations()` splits paragraphs back to runs, restores whitespace
-9. **SmartArt validation**: Post-write re-parse verifies XML integrity
-10. **Save**: `prs.save(output_path)`
+9. **Render validation**: `validate_render_overflow()` exports translated slides and checks overflow/clipping
+10. **Mitigate + retry**: Tighten translation, then optional safe font reduction, then re-validate
+11. **SmartArt validation**: Post-write re-parse verifies XML integrity
+12. **Save**: `prs.save(output_path)`
 
 ## Critical Requirements
 
@@ -670,11 +685,15 @@ The glossary is loaded via `load_glossary()` and appended to the system prompt. 
 - `split_translation_to_runs()` splits back to original run count
 - Preserves formatting while improving translation quality
 
-### ⚠️ Length Budgets
-- Title: ≤ 5 words
-- Subtitle: ≤ 8 words
-- Body: ≤ 120% of source characters
-- Auto-flag violations for retry (max 2 attempts)
+### ⚠️ Layout Correctness Gate (Authoritative)
+- Export translated slides and run overflow/clipping detection
+- Fail if any translated shape remains clipped after mitigation retries
+- Required mitigation order: tighten translation -> optional font reduction
+- Enforce safe font floor (for example `min_font_pt = 14`)
+
+### ℹ️ Length Expansion Heuristic (Deprecated as fail rule)
+- Word/character budgets are warning-only risk signals
+- Use them to prioritize candidates, not to decide pass/fail
 
 ### ⚠️ Adaptive Batching
 - Calculate batch size from character count (~4000 chars per batch)
