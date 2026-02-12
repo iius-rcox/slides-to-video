@@ -168,10 +168,20 @@ Always wrap COM operations in `try/finally` with proper cleanup.
 
 ## TTS / Audio Issues
 
-### ElevenLabs API rate limit
-**Symptom:** `429 Too Many Requests` during TTS synthesis.
+### ElevenLabs API rate limit / transient API failures
+**Symptom:** `429 Too Many Requests`, `5xx`, or timeout-like failures during TTS synthesis.
 
-**Fix:** Add retries with exponential backoff. If persistent, reduce concurrency or add longer delays between requests.
+**Fix:** `synthesize_tts.py` now retries transient failures automatically with exponential backoff + jitter. Tune these knobs as needed:
+- `TTS_API_MAX_RETRIES` (default `5`)
+- `TTS_API_BACKOFF_BASE_SEC` (default `1.0`)
+- `TTS_API_BACKOFF_MAX_SEC` (default `20.0`)
+- `TTS_API_BACKOFF_JITTER_SEC` (default `0.5`)
+
+If failures persist after retries:
+1. Verify `ELEVENLABS_API_KEY`
+2. Confirm the `voice_id` is valid
+3. Check ElevenLabs service status
+4. Re-run later (successful slide WAVs are reused)
 
 ### TTS audio sounds wrong language
 **Symptom:** Audio is synthesized but sounds like the wrong language.
@@ -194,6 +204,19 @@ Always wrap COM operations in `try/finally` with proper cleanup.
 **Cause:** The speaker notes for that slide are empty or whitespace-only.
 
 **Fix:** Check the notes extraction output (`notes.json`). Verify the slide has speaker notes in the PPTX. Slides with empty notes are treated as silent slides (static image with `SILENT_SLIDE_DUR` duration).
+
+### WAV validation failures after synthesis
+**Symptom:** A slide logs validation errors (empty/corrupt WAV, unreadable header, or duration below threshold) and eventually fails.
+
+**Cause:** API returned incomplete audio, or text is too short for the configured duration floor.
+
+**Fix:**
+1. Re-run synthesis — transient output failures may self-heal
+2. Reduce `TTS_MIN_WAV_DURATION_SEC` if short clips are expected (default `0.35`)
+3. Increase `TTS_SLIDE_MAX_RETRIES` to allow more re-synthesis attempts (default `2`)
+4. Review/refine the slide note text to ensure it contains meaningful narration
+
+The script now emits per-slide status and a final failure summary so you can quickly isolate affected slides.
 
 ### Audio quality or pronunciation issues
 **Symptom:** TTS mispronounces words or sounds unnatural.
