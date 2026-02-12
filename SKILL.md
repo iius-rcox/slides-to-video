@@ -25,8 +25,8 @@ Each slide's duration is driven by its audio length, producing natural pacing. Q
 - API key in `~/.env`: `ELEVENLABS_API_KEY`
 - ElevenLabs Python SDK: `elevenlabs`
 
-**No OpenAI dependency.** Note refinement is done by Claude Code (Opus) directly in-context.
-Translation (if needed) also uses Claude in-context — no external LLM API required.
+**Translation mode: Automated pipeline.** Translation runs through `translate_pptx.py` (Anthropic API) with deterministic traversal, batching, retries, and machine-readable reports.
+Note refinement is still done by Claude Code (Opus) in-context.
 
 **Configuration files (in the skill directory):**
 - `lang_config.json` — Per-language voice IDs, VoiceSettings, TTS replacements, text normalization rules
@@ -44,6 +44,7 @@ Reusable scripts live in the skill directory. Invoke them with CLI arguments —
 
 | Script | Purpose | Usage |
 |--------|---------|-------|
+| `./translate_pptx.py` | Automated PPTX translation (slides/tables/SmartArt/notes) | `python translate_pptx.py --input-pptx <in.pptx> --output-pptx <out.pptx> --target-language <lang>` |
 | `./extract_notes.py` | Extract speaker notes from PPTX | `python extract_notes.py <pptx> <output.json>` |
 | `./export_slides.ps1` | Export slides as PNGs via PowerPoint COM | `powershell -File export_slides.ps1 -PptxPath <pptx> -OutputDir <dir>` |
 | `./synthesize_tts.py` | Synthesize TTS audio per slide | `python synthesize_tts.py <notes.json> <audio_dir> [--voice-id ID] [--lang en]` |
@@ -79,7 +80,7 @@ The `eleven_multilingual_v2` model handles any language from any voice, but a vo
 # Pipeline Overview
 
 ```
-PPTX ──> [Optional: Translate text + notes + SmartArt]
+PPTX ──> [Optional: Automated translation] (translate_pptx.py)
      ──> Extract Speaker Notes    (extract_notes.py)
      ──> [Auto: Refine notes]     (Claude Code Opus — in-context)
      ──> Export Slide PNGs         (export_slides.ps1)
@@ -90,41 +91,54 @@ PPTX ──> [Optional: Translate text + notes + SmartArt]
 
 # Step 1 (Optional): Translate the PPTX
 
-**Skip this step if** the PPTX is already in the target language.
+**Workflow choice: Automated translation pipeline (not semi-manual).**
 
-**Script pattern:** See `./pptx-translation-script.md`
-**Prompt template:** See `./translation-prompt-template.md`
-**Glossary:** See `./glossary_en_es.json`
-**QA checks:** See `./translation-qa.md`
+**Script:** `./translate_pptx.py`
+**Artifacts required (preflight-checked):**
+- Source PPTX (`--input-pptx`)
+- Glossary file (`--glossary`, default `glossary_en_es.json`)
+- Prompt template (`--prompt-template`, default `translation-prompt-template.md`)
+- `ANTHROPIC_API_KEY` environment variable
 
-### Translation Process
+If any required artifact is missing, the script exits immediately with a clear preflight error.
 
-1. Open the PPTX with `python-pptx`
-2. **Load glossary** from `glossary_en_es.json` — provides canonical term translations and never-translate list
-3. Walk all slides -> shapes -> text frames -> **paragraphs** (not individual runs)
-4. For each shape, detect its **role** (`title`, `subtitle`, `body`) using `PP_PLACEHOLDER` types
-5. **Collect text at paragraph level** using `||N||` run boundary markers to preserve run structure. This ensures Claude translates complete sentences, not run fragments.
-6. **Walk SmartArt diagrams** — stored in diagram data XML parts. Access via `diagramData` relationship type, iterate `<a:t>` elements. **Always freeze to `list()`** for stable order in both collection and write-back.
-7. **Walk speaker notes** — these get translated too so the TTS reads the target language
-8. Collect all text with metadata: `{id, text, role, location, type}` where type is `slide`, `table`, `smartart`, or `notes`
+## CLI usage
 
-### Adaptive Batching
+```bash
+python translate_pptx.py \
+  --input-pptx ./deck_en.pptx \
+  --output-pptx ./deck_es.pptx \
+  --target-language Spanish \
+  --lang-code es \
+  --glossary ./glossary_en_es.json \
+  --prompt-template ./translation-prompt-template.md \
+  --report-json ./translation_report.json
+```
 
-9. **Estimate batch sizes** based on character count (~4000 chars/batch) instead of fixed batch sizes. This prevents context window overflow with long text and avoids wasting capacity on short text.
-10. **Claude (Opus) translates in-context** — applies the glossary, enforces length budgets (title ≤5 words, subtitle ≤8 words, body ≤120% of source), and uses the appropriate prompt based on text type (`notes` → narration prompt, others → slide prompt)
-11. **Retry missing IDs** — if any text items are dropped from a batch response, automatically retranslate them in a smaller batch
+## Expected inputs / outputs
 
-### Write-Back & Validation
+**Inputs**
+- PPTX with text in slides, tables, SmartArt, and/or notes
+- Glossary JSON with `glossary` map + `never_translate` list
+- Prompt template markdown
 
-12. Write translations back, preserving formatting (font, size, color, bold, italic, position, images)
-13. **Split paragraph translations** back to individual runs using `||N||` markers via `split_translation_to_runs()`
-14. **For SmartArt:** write translated text back to the diagram data XML blob and update the part. Run a post-write regression check to verify text matches expected.
-15. **MANDATORY:** Restore leading/trailing whitespace from original runs via `_restore_whitespace()` to prevent concatenation bugs (e.g., "Visiony" instead of "Vision y"). Run a validation scan after all writes.
-16. **Run translation QA** — 6 automated checks (see `./translation-qa.md`): never-translate preservation, number preservation, bullet structure, title length budget, glossary compliance, empty translation detection. ERROR-severity items are auto-retranslated (max 2 attempts).
-17. **Check length budgets** — auto-retranslate any items exceeding their word count limits
-18. Save as `{stem}_{lang_code}.pptx`
+**Outputs**
+- Translated PPTX at `--output-pptx`
+- Stable machine-readable report JSON at `--report-json` with schema:
+  - `schema_version`, `timestamp_utc`
+  - `input_pptx`, `output_pptx`, `target_language`, `lang_code`
+  - `total_items`, `total_batches`, `translated_items`
+  - `batches[]` containing `batch_index`, `item_ids`, `attempts`, `translated_count`, `missing_ids`, `errors`
 
-**Checkpoint:** If `{stem}_{lang_code}.pptx` exists, skip this step.
+## Translation guarantees
+
+- Deterministic traversal order (slides → shapes → tables → SmartArt relationships sorted by `rId` → notes)
+- Character-budget batching (`--batch-char-limit`)
+- Retry handling for dropped IDs / transient API failures (`--max-retries`)
+- Glossary and never-translate post-enforcement before write-back
+- Run-level formatting preservation via paragraph marker split/merge (`||N||`)
+
+**Checkpoint:** If `{stem}_{lang_code}.pptx` exists and user accepts it, skip this step.
 
 # Step 2: Extract Narration Script
 
