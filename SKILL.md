@@ -12,7 +12,7 @@ Generates a narrated video from a PowerPoint file by:
 4. Applying language-specific text normalization and TTS pronunciation fixes
 5. Exporting slides as 1920x1080 PNG images
 6. Synthesizing voiceover audio via ElevenLabs TTS (per-language voice config from `lang_config.json`)
-7. Assembling a video: slide images + audio + crossfade transitions + broadcast-quality audio processing
+7. Assembling a video: slide images + audio + crossfade transitions + configurable broadcast-quality audio processing (language and voice aware)
 
 Each slide's duration is driven by its audio length, producing natural pacing. Quality gates at each pipeline stage catch errors early.
 
@@ -29,7 +29,7 @@ Each slide's duration is driven by its audio length, producing natural pacing. Q
 Translation (if needed) also uses Claude in-context — no external LLM API required.
 
 **Configuration files (in the skill directory):**
-- `lang_config.json` — Per-language voice IDs, VoiceSettings, TTS replacements, text normalization rules
+- `lang_config.json` — Per-language voice IDs, VoiceSettings, TTS replacements, text normalization rules, and audio post-processing presets (plus optional per-voice overrides)
 - `glossary_en_es.json` — EN→ES terminology glossary + never-translate list (used during translation)
 
 **Verify with:**
@@ -259,6 +259,27 @@ Add entries to `lang_config.json` when TTS mispronounces a word or brand name.
 
 **Output:** `audio/slide_01.wav`, `audio/slide_02.wav`, ... (WAV files, not MP3)
 
+## Audio Post-Processing Presets (assemble_video.py)
+
+`assemble_video.py` now reads `audio_postprocessing` from `lang_config.json` (selected by `--lang`, with optional `--voice-id` override lookup).
+
+Supported controls:
+- `presence_eq.enabled` / `presence_eq.gain_db` — tune or disable the ~3kHz presence lift
+- `highpass.enabled` / `highpass.frequency` — tune or disable low-end rumble filtering
+- `limiter.intensity` — scale limiter aggressiveness (0.0 = mild, 1.0 = strongest)
+- `deesser.enabled` / `deesser.intensity` — optional de-esser for sibilant voices
+- `loudnorm.two_pass` — optional first-pass measurement mode for long-form stability
+
+Override precedence:
+1. Built-in defaults in `assemble_video.py`
+2. `lang_config.json` -> `<lang>.audio_postprocessing`
+3. `lang_config.json` -> `<lang>.voice_overrides.<voice_id>.audio_postprocessing`
+
+Example:
+```bash
+python assemble_video.py notes_refined.json slides audio output.mp4 --lang en --voice-id NHjG3gYsiwhncLX4Nfhc
+```
+
 **Checkpoint:** Per-slide — if `audio/slide_NN.wav` exists, skip that slide.
 
 # Step 5: Assemble Final Video
@@ -276,9 +297,14 @@ Audio and video MUST be built as separate tracks and muxed at the end. The audio
 1. **Pad per-slide audio as lossless WAV** — use `pcm_s16le` intermediates, NOT AAC, to avoid lossy compression at this stage. For silent slides, create a WAV of silence.
 2. **Concatenate all WAVs** into one continuous lossless audio track using ffmpeg concat demuxer (no re-encode: `-c:a pcm_s16le`).
 3. **Build video-only slideshow** from slide PNGs with xfade crossfade transitions (`-an` flag, no audio in the filter graph). Use per-slide durations matching their padded audio. Falls back to concat demuxer if xfade fails.
-4. **Mux video + audio** with broadcast-quality audio processing in a single final step:
+4. **Mux video + audio** with configurable broadcast-quality audio processing in a single final step:
    - `-c:v copy` (no video re-encode)
-   - Audio filter chain: `loudnorm=I=-16:LRA=11:TP=-1.5` (EBU R128 broadcast loudness) → `highpass=f=80` (remove low-frequency rumble) → `equalizer=f=3000:width_type=o:width=1.5:g=1.5` (speech presence boost) → `alimiter=limit=0.891:attack=5:release=50` (peak limiter at -1dB)
+   - Audio filter chain is built from `lang_config.json` presets:
+     - optional `deesser` for sibilant voices
+     - `highpass` (rumble control)
+     - `equalizer` presence boost near 3kHz (`presence_eq`)
+     - `loudnorm` (single-pass or optional two-pass mode)
+     - `alimiter` with tunable `limiter.intensity`
    - `-c:a aac -b:a 256k` (single high-quality AAC encode)
    - `-ar 44100` (consistent sample rate)
    - `-movflags +faststart` (web streaming optimization)
