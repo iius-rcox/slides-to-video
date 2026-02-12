@@ -14,6 +14,7 @@ Quality gates are validation checkpoints at each stage of the PPTX-to-video pipe
 | Body length within budget | WARNING | Body text ≤ 120% of source word count |
 | Glossary terms used consistently | WARNING | Canonical translations used where applicable |
 | Numbers preserved | WARNING | All numbers from source appear in translation |
+| Paragraph/list structure preserved | WARNING | Per text frame: paragraph count, bullet state, and list levels match source |
 | Whitespace restored on all runs | CRITICAL | `_restore_whitespace()` applied to every write-back |
 | SmartArt text order preserved | CRITICAL | Post-write re-parse matches expected text sequence |
 
