@@ -88,6 +88,27 @@ PPTX ──> [Optional: Translate text + notes + SmartArt]
      ──> {stem}_{lang}.mp4
 ```
 
+
+## Canonical Expected Directory Structure
+
+Use this as the canonical layout for one run:
+
+```text
+<work_dir>/
+├── notes.json
+├── notes_refined.json
+├── slides/
+│   ├── slide_01.png
+│   ├── slide_02.png
+│   └── ...
+└── audio/
+    ├── slide_01.wav
+    ├── slide_02.wav
+    └── ...
+```
+
+`assemble_video.py` expects narrated slides to have matching `audio/slide_XX.wav` files. Empty-note slides are the only ones that should omit narration audio.
+
 # Step 1 (Optional): Translate the PPTX
 
 **Skip this step if** the PPTX is already in the target language.
@@ -261,6 +282,14 @@ Add entries to `lang_config.json` when TTS mispronounces a word or brand name.
 **Output:** `audio/slide_01.wav`, `audio/slide_02.wav`, ... (WAV files, not MP3)
 
 **Checkpoint:** Per-slide — if `audio/slide_NN.wav` exists, skip that slide.
+
+
+**Legacy MP3 migration (explicit):** If older runs produced `audio/slide_XX.mp3`, treat them as legacy inputs and convert before assembly:
+
+```bash
+ffmpeg -y -i audio/slide_XX.mp3 -ar 44100 -ac 2 -c:a pcm_s16le audio/slide_XX.wav
+```
+
 
 # Step 5: Assemble Final Video
 
