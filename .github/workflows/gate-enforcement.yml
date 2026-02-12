@@ -1,0 +1,25 @@
+name: Gate Enforcement
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  enforce-gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Ensure scripts compile
+        run: |
+          python -m py_compile run_gates.py assemble_video.py
+
+      - name: Ensure assembly invokes authoritative gate runner
+        run: |
+          rg -n "run_gates.py" assemble_video.py

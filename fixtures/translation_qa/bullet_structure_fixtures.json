@@ -1,0 +1,67 @@
+{
+  "cases": [
+    {
+      "name": "exact_match_with_levels",
+      "source": {
+        "slide 1, shape 2": [
+          {"paragraph_index": 0, "bullet_enabled": true, "level": 0},
+          {"paragraph_index": 1, "bullet_enabled": true, "level": 1},
+          {"paragraph_index": 2, "bullet_enabled": false, "level": 0}
+        ]
+      },
+      "translated": {
+        "slide 1, shape 2": [
+          {"paragraph_index": 0, "bullet_enabled": true, "level": 0},
+          {"paragraph_index": 1, "bullet_enabled": true, "level": 1},
+          {"paragraph_index": 2, "bullet_enabled": false, "level": 0}
+        ]
+      },
+      "expected_warning_checks": []
+    },
+    {
+      "name": "paragraph_count_changed",
+      "source": {
+        "slide 2, shape 1": [
+          {"paragraph_index": 0, "bullet_enabled": true, "level": 0},
+          {"paragraph_index": 1, "bullet_enabled": true, "level": 0}
+        ]
+      },
+      "translated": {
+        "slide 2, shape 1": [
+          {"paragraph_index": 0, "bullet_enabled": true, "level": 0}
+        ]
+      },
+      "expected_warning_checks": ["paragraph_count"]
+    },
+    {
+      "name": "bullet_state_and_level_changed",
+      "source": {
+        "slide 3, shape 4": [
+          {"paragraph_index": 0, "bullet_enabled": true, "level": 0},
+          {"paragraph_index": 1, "bullet_enabled": true, "level": 2}
+        ]
+      },
+      "translated": {
+        "slide 3, shape 4": [
+          {"paragraph_index": 0, "bullet_enabled": false, "level": 0},
+          {"paragraph_index": 1, "bullet_enabled": true, "level": 1}
+        ]
+      },
+      "expected_warning_checks": ["bullet_state", "list_level"]
+    },
+    {
+      "name": "table_cell_frame_level_change",
+      "source": {
+        "slide 4, table 0, cell 1,1": [
+          {"paragraph_index": 0, "bullet_enabled": true, "level": 1}
+        ]
+      },
+      "translated": {
+        "slide 4, table 0, cell 1,1": [
+          {"paragraph_index": 0, "bullet_enabled": true, "level": 0}
+        ]
+      },
+      "expected_warning_checks": ["list_level"]
+    }
+  ]
+}

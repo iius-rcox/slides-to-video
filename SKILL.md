@@ -44,6 +44,7 @@ Reusable scripts live in the skill directory. Invoke them with CLI arguments —
 
 | Script | Purpose | Usage |
 |--------|---------|-------|
+| `./translate_pptx.py` | Automated PPTX translation (slides/tables/SmartArt/notes) | `python translate_pptx.py --input-pptx <in.pptx> --output-pptx <out.pptx> --target-language <lang>` |
 | `./extract_notes.py` | Extract speaker notes from PPTX | `python extract_notes.py <pptx> <output.json>` |
 | `./export_slides.ps1` | Export slides as PNGs via PowerPoint COM | `powershell -File export_slides.ps1 -PptxPath <pptx> -OutputDir <dir>` |
 | `./synthesize_tts.py` | Synthesize TTS audio per slide | `python synthesize_tts.py <notes.json> <audio_dir> [--voice-id ID] [--lang en]` |
@@ -297,6 +298,32 @@ Add entries to `lang_config.json` when TTS mispronounces a word or brand name.
 
 **Output:** `audio/slide_01.wav`, `audio/slide_02.wav`, ... (WAV files, not MP3)
 
+## TTS Reliability Controls (Retry + Validation)
+
+`synthesize_tts.py` hardens per-slide generation in two layers:
+1. **Transient API retries** with exponential backoff + jitter for status `429` and `5xx` (plus timeout-like errors)
+2. **Output validation retries** that re-synthesize a slide if the generated WAV is empty/corrupt/too short
+
+Tune behavior with environment variables:
+
+| Env var | Default | Purpose |
+|--------|---------|---------|
+| `TTS_API_MAX_RETRIES` | `5` | Max attempts per API call before giving up (includes first attempt) |
+| `TTS_API_BACKOFF_BASE_SEC` | `1.0` | Base exponential backoff delay |
+| `TTS_API_BACKOFF_MAX_SEC` | `20.0` | Maximum sleep between API retries |
+| `TTS_API_BACKOFF_JITTER_SEC` | `0.5` | Random jitter added to each backoff delay |
+| `TTS_SLIDE_MAX_RETRIES` | `2` | Max re-synthesis retries when WAV validation fails |
+| `TTS_MIN_WAV_DURATION_SEC` | `0.35` | Minimum acceptable WAV duration; shorter files are treated as failures |
+
+Example override:
+```bash
+TTS_API_MAX_RETRIES=7 \
+TTS_API_BACKOFF_BASE_SEC=1.5 \
+TTS_SLIDE_MAX_RETRIES=3 \
+TTS_MIN_WAV_DURATION_SEC=0.25 \
+python synthesize_tts.py "<work_dir>/notes_refined.json" "<work_dir>/audio" --lang en
+```
+
 ## Audio Post-Processing Presets (assemble_video.py)
 
 `assemble_video.py` now reads `audio_postprocessing` from `lang_config.json` (selected by `--lang`, with optional `--voice-id` override lookup).
@@ -436,10 +463,12 @@ Given input `Presentation.pptx` and language `es`:
 # Supporting Files
 
 **Permanent scripts (invoke directly):**
+- `./translate_pptx.py` — Automated PPTX translation via Anthropic API (slides, tables, SmartArt, notes)
 - `./extract_notes.py` — Extract speaker notes from PPTX + robotic style detection
 - `./export_slides.ps1` — PowerPoint COM slide export (Windows)
-- `./synthesize_tts.py` — ElevenLabs TTS with quality optimizations
+- `./synthesize_tts.py` — ElevenLabs TTS with quality optimizations + retry/validation
 - `./assemble_video.py` — Split-track video assembly
+- `./run_gates.py` — Standalone quality gate runner (validates pipeline artifacts, produces JSON report)
 
 **Reference documentation:**
 - `./translation-prompt-template.md` — Translation system prompts (slide text + narration) with glossary placeholders
