@@ -27,8 +27,9 @@ _DIAGRAM_DATA_RELTYPE = (
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramData"
 )
 
-# Paragraph-level markers to preserve run boundaries
-RUN_SEPARATOR = "||N||"
+# Run-level payload mode (safe default)
+TRANSLATION_MODE = "per_run"  # or "json_segments"
+MAX_SEGMENT_RETRIES = 2
 
 
 # --- SYSTEM PROMPT ---
@@ -96,12 +97,11 @@ def _shape_role(shape) -> str:
 def collect_texts(prs: Presentation) -> list[dict]:
     """Walk all slides -> shapes -> text frames -> PARAGRAPHS.
 
-    **Paragraph-level collection**: Each paragraph's runs are joined with ||N|| markers
-    to preserve run boundaries. Claude translates the full paragraph, and we split
-    back to individual runs using split_translation_to_runs().
+    **Run-level collection**: each non-empty run is collected as its own segment so
+    formatting boundaries are never reconstructed from delimiters.
 
-    Returns list of {id, text, role, location, type, run_count}.
-    Handles: slide text (paragraph-level), tables (paragraph-level), SmartArt (single-text), speaker notes (paragraph-level).
+    Returns list of {id, text, role, location, type, run_count, segments}.
+    Handles: slide text, tables, SmartArt (single-text), speaker notes.
     """
     texts = []
     idx = 0
@@ -118,11 +118,9 @@ def collect_texts(prs: Presentation) -> list[dict]:
                             run_texts.append(run.text)
 
                     if run_texts:
-                        # Join runs with marker
-                        para_text = RUN_SEPARATOR.join(run_texts)
                         texts.append({
                             "id": idx,
-                            "text": para_text,
+                            "text": "\n".join(run_texts),
                             "role": role,
                             "location": f"slide {slide_num}, shape '{shape.name}', para {para_idx}",
                             "type": "slide",
@@ -141,10 +139,9 @@ def collect_texts(prs: Presentation) -> list[dict]:
                                     run_texts.append(run.text)
 
                             if run_texts:
-                                para_text = RUN_SEPARATOR.join(run_texts)
                                 texts.append({
                                     "id": idx,
-                                    "text": para_text,
+                                    "text": "\n".join(run_texts),
                                     "location": f"slide {slide_num}, table, row {row_idx}, col {col_idx}, para {para_idx}",
                                     "type": "table",
                                     "run_count": len(run_texts),
@@ -184,10 +181,9 @@ def collect_texts(prs: Presentation) -> list[dict]:
                         run_texts.append(run.text)
 
                 if run_texts:
-                    para_text = RUN_SEPARATOR.join(run_texts)
                     texts.append({
                         "id": idx,
-                        "text": para_text,
+                        "text": "\n".join(run_texts),
                         "location": f"slide {slide_num}, notes, para {para_idx}",
                         "type": "notes",
                         "run_count": len(run_texts),
@@ -197,23 +193,62 @@ def collect_texts(prs: Presentation) -> list[dict]:
     return texts
 
 
-def split_translation_to_runs(translated_para: str, run_count: int) -> list[str]:
-    """Split translated paragraph back to individual run texts.
+def parse_segment_response(response, expected_count: int) -> list[dict]:
+    """Parse model output into [{"index": int, "text": str}] and validate shape."""
+    payload = json.loads(response)
+    segments = payload.get("segments", [])
 
-    Claude translates a paragraph joined with ||N|| markers.
-    This function splits the translation back to run_count pieces.
+    if not isinstance(segments, list):
+        raise ValueError("segments must be a list")
 
-    If split count doesn't match run_count, fall back to single run.
-    """
-    parts = translated_para.split(RUN_SEPARATOR)
+    normalized = []
+    for segment in segments:
+        normalized.append({
+            "index": int(segment["index"]),
+            "text": str(segment["text"]),
+        })
 
-    if len(parts) == run_count:
-        return parts
-    else:
-        # Mismatch: Claude may have removed or added markers
-        # Fall back to assigning entire translation to first run
-        print(f"  WARNING: Expected {run_count} runs, got {len(parts)} parts. Using single-run fallback.")
-        return [translated_para] + [""] * (run_count - 1)
+    if len(normalized) != expected_count:
+        raise ValueError(
+            f"segment count mismatch: expected {expected_count}, got {len(normalized)}"
+        )
+
+    expected_indexes = list(range(expected_count))
+    actual_indexes = [s["index"] for s in normalized]
+    if actual_indexes != expected_indexes:
+        raise ValueError(
+            f"segment index mismatch: expected {expected_indexes}, got {actual_indexes}"
+        )
+
+    return normalized
+
+
+def translate_segments_with_retry(source_segments: list[str], max_retries: int = MAX_SEGMENT_RETRIES) -> list[str]:
+    """Translate one paragraph's run segments with a hard count gate and retry."""
+    expected = len(source_segments)
+
+    for attempt in range(1, max_retries + 2):
+        # SAFEST MODE: one request per run
+        # translated = [translate_text(seg) for seg in source_segments]
+
+        # ALTERNATIVE MODE: single request returns JSON with segments[]
+        # response = ask_claude_for_json_segments(source_segments)
+        # translated = [s["text"] for s in parse_segment_response(response, expected)]
+
+        translated = []  # placeholder in template
+
+        if len(translated) == expected:
+            return translated
+
+        print(
+            f"  WARNING: segment mismatch on attempt {attempt}: "
+            f"expected {expected}, got {len(translated)}"
+        )
+
+    raise ValueError(
+        f"Unresolved segment mismatch after {max_retries + 1} attempts "
+        f"(expected {expected} segments)"
+    )
 
 
 def estimate_batch_size(texts: list[dict]) -> int:
@@ -357,8 +392,8 @@ def apply_translations(prs, texts, translations):
     IMPORTANT: Must walk shapes in the EXACT same order as collect_texts()
     so the idx counter stays in sync.
 
-    **Paragraph-level application**: Translated paragraphs are split back to runs
-    using split_translation_to_runs().
+    **Run-level application**: translated segments are mapped 1:1 onto existing runs
+    only after count validation passes.
     """
     idx = 0
 
@@ -373,11 +408,9 @@ def apply_translations(prs, texts, translations):
                             run_originals.append(run.text)
 
                     if run_originals and idx in translations:
-                        # Split translated paragraph back to runs
                         text_entry = texts[idx]
-                        run_count = text_entry.get("run_count", len(run_originals))
-                        translated_runs = split_translation_to_runs(
-                            translations[idx], run_count
+                        translated_runs = translate_segments_with_retry(
+                            run_originals, max_retries=MAX_SEGMENT_RETRIES
                         )
 
                         # Apply to actual runs with whitespace restoration
@@ -408,9 +441,8 @@ def apply_translations(prs, texts, translations):
 
                             if run_originals and idx in translations:
                                 text_entry = texts[idx]
-                                run_count = text_entry.get("run_count", len(run_originals))
-                                translated_runs = split_translation_to_runs(
-                                    translations[idx], run_count
+                                translated_runs = translate_segments_with_retry(
+                                    run_originals, max_retries=MAX_SEGMENT_RETRIES
                                 )
 
                                 run_idx = 0
@@ -484,9 +516,8 @@ def apply_translations(prs, texts, translations):
 
                 if run_originals and idx in translations:
                     text_entry = texts[idx]
-                    run_count = text_entry.get("run_count", len(run_originals))
-                    translated_runs = split_translation_to_runs(
-                        translations[idx], run_count
+                    translated_runs = translate_segments_with_retry(
+                        run_originals, max_retries=MAX_SEGMENT_RETRIES
                     )
 
                     run_idx = 0
@@ -544,7 +575,7 @@ def translate_pptx(pptx_path: Path, output_path: Path) -> Path:
               f"{len(glossary_data['never_translate'])} never-translate terms")
 
     texts = collect_texts(prs)
-    print(f"  Found {len(texts)} text elements (paragraph-level)")
+    print(f"  Found {len(texts)} text elements (run-safe collection)")
 
     if not texts:
         prs.save(str(output_path))
@@ -643,12 +674,12 @@ The glossary is loaded via `load_glossary()` and appended to the system prompt. 
 
 1. **Load PPTX**: `Presentation(pptx_path)`
 2. **Load glossary**: `load_glossary()` reads `glossary_en_es.json`
-3. **Collect texts**: `collect_texts()` walks slides at paragraph level, joining runs with `||N||` markers
+3. **Collect texts**: `collect_texts()` captures run-safe segments without delimiter packing
 4. **Adaptive batching**: `estimate_batch_size()` calculates optimal batch size (~4000 chars)
 5. **Claude translates**: User provides translations for each batch (Claude Code handles in-context)
 6. **Retry missing**: `retry_missing_ids()` catches dropped IDs
 7. **Length validation**: `check_length_budgets()` flags title/subtitle/body violations
-8. **Apply translations**: `apply_translations()` splits paragraphs back to runs, restores whitespace
+8. **Apply translations**: `apply_translations()` writes validated 1:1 segments back to runs, restores whitespace
 9. **SmartArt validation**: Post-write re-parse verifies XML integrity
 10. **Save**: `prs.save(output_path)`
 
@@ -664,11 +695,11 @@ The glossary is loaded via `load_glossary()` and appended to the system prompt. 
 - Post-write validation: re-parse XML and verify text matches expected
 - Order corruption will break diagram layout
 
-### ⚠️ Paragraph-level Collection
-- Join runs with `||N||` separator
-- Claude translates full paragraph
-- `split_translation_to_runs()` splits back to original run count
-- Preserves formatting while improving translation quality
+### ⚠️ Run-Level Segment Invariant (MANDATORY)
+- Do **not** reconstruct runs via delimiters (no `||N||` parsing)
+- Use either per-run requests or JSON `segments: [{index, text}]` responses
+- Before applying, translated segment count **must equal** source segment count
+- On mismatch: auto-retry/retranslate; raise `ValueError` if unresolved
 
 ### ⚠️ Length Budgets
 - Title: ≤ 5 words

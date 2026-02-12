@@ -1,6 +1,29 @@
 # Translation QA Check Patterns
 
-Post-translation quality assurance checks run automatically after `apply_translations()`. Claude executes these checks in-context and auto-retranslates ERROR items (max 2 attempts). WARNING items are logged but do not block the pipeline.
+Post-translation quality assurance checks run automatically before and after `apply_translations()`. Claude executes these checks in-context and auto-retranslates ERROR items (max 2 attempts). WARNING items are logged but do not block the pipeline. A segment-count invariant is a hard gate and must block write-back when unresolved.
+
+## Hard Invariant (Run-Level Segment Count)
+
+Before any translated text is written into PPTX runs, the translated segment count **must** equal the source segment count for that paragraph/run group.
+
+- Allowed transfer formats:
+  - Per-run translation requests (1 request per source run), or
+  - JSON response with ordered segments: `{"segments": [{"index": 0, "text": "..."}, ...]}`.
+- Delimiter-based run reconstruction is not allowed.
+- On mismatch, trigger automatic retranslation/retry.
+- If still mismatched after retries, raise an exception and fail the translation job.
+
+```python
+def enforce_segment_invariant(source_segments, translated_segments):
+    """ERROR gate: block write-back on run-count mismatch."""
+    expected = len(source_segments)
+    actual = len(translated_segments)
+    if actual != expected:
+        raise ValueError(
+            f"Segment mismatch: expected {expected}, got {actual}. "
+            "Retranslation required before PPTX write-back."
+        )
+```
 
 ## QA Checks
 
@@ -175,13 +198,16 @@ When ERROR items are detected:
 2. Re-run translation for just those items with stricter instructions appended to the prompt:
    - "These items failed QA. Pay special attention to: [list specific failures]"
 3. Re-run QA checks on the retranslated items
-4. If errors persist after 2 retranslation attempts, log as CRITICAL and continue (do not block the pipeline indefinitely)
+4. If errors persist after 2 retranslation attempts, raise CRITICAL and fail the pipeline (block PPTX write-back)
 
 ## Running QA
 
 ```python
 def run_translation_qa(original_texts, translated_texts, glossary, never_translate):
     """Run all QA checks and return categorized results."""
+    # Hard gate should run before applying translations to runs
+    # enforce_segment_invariant(source_segments, translated_segments)
+
     results = []
     results.extend(check_never_translate(original_texts, translated_texts, never_translate))
     results.extend(check_number_preservation(original_texts, translated_texts))
