@@ -34,6 +34,55 @@ SILENT_SLIDE_DUR = 2.0
 TRANSITION_DURATION = 0.5
 
 
+def _is_narrated_slide(note: dict) -> bool:
+    """Return True when this slide is expected to have narration audio."""
+    return bool(str(note.get("text", "")).strip())
+
+
+def preflight_audio_files(notes: list[dict], audio_dir: Path) -> None:
+    """Validate narrated slides have expected WAV files before ffmpeg work starts."""
+    missing_wav: list[tuple[int, Path]] = []
+    legacy_mp3_present: list[tuple[int, Path]] = []
+
+    for note in notes:
+        if not _is_narrated_slide(note):
+            continue
+
+        sn = note["slide"]
+        wav_file = audio_dir / f"slide_{sn:02d}.wav"
+        mp3_file = audio_dir / f"slide_{sn:02d}.mp3"
+
+        if wav_file.exists():
+            continue
+
+        missing_wav.append((sn, wav_file))
+        if mp3_file.exists():
+            legacy_mp3_present.append((sn, mp3_file))
+
+    if not missing_wav:
+        return
+
+    print("\nERROR: Missing narration WAV files for narrated slides:")
+    for sn, wav_file in missing_wav:
+        print(f"  - Slide {sn:02d}: expected {wav_file}")
+
+    print("\nAction: Generate WAV narration files before assembly.")
+    print("  python synthesize_tts.py <notes_json> <audio_dir> --lang <lang>")
+
+    if legacy_mp3_present:
+        print("\nLegacy MP3 detected (supported for migration only, not used by assembler):")
+        for sn, mp3_file in legacy_mp3_present:
+            print(f"  - Slide {sn:02d}: found legacy file {mp3_file}")
+
+        print("\nConvert legacy MP3 to expected WAV format with:")
+        print(
+            "  ffmpeg -y -i audio/slide_XX.mp3 -ar 44100 -ac 2 -c:a pcm_s16le "
+            "audio/slide_XX.wav"
+        )
+
+    raise FileNotFoundError("Preflight failed: missing narration WAV files.")
+
+
 def get_duration(path: Path) -> float:
     r = subprocess.run(
         ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", str(path)],
@@ -229,6 +278,8 @@ def main():
 
     with open(notes_path, "r", encoding="utf-8") as f:
         notes = json.load(f)
+
+    preflight_audio_files(notes, audio_dir)
 
     # Step 1: Pad audio as lossless WAV
     print("Step 1: Preparing per-slide audio (WAV lossless)...")
